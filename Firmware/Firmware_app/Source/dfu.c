@@ -1,12 +1,12 @@
 /*
     Copyright 2021 codenocold codenocold@qq.com
-    Address : https://github.com/codenocold/dgm
-    This file is part of the dgm firmware.
-    The dgm firmware is free software: you can redistribute it and/or modify
+    Address : https://github.com/codenocold/ctm
+    This file is part of the ctm firmware.
+    The ctm firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    The dgm firmware is distributed in the hope that it will be useful,
+    The ctm firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -90,8 +90,8 @@ static int erase_app_back(void)
 
     // Erase
     for (addr = APP_BACK_ADDR; addr < APP_BACK_ADDR + APP_MAX_SIZE; addr += PAGE_SIZE) {
-        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGAERR | FMC_FLAG_PGERR);
-        status = fmc_page_erase(addr);
+        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGSERR);
+        status = fmc_sector_erase(addr);
         if (status != FMC_READY) {
             fmc_lock();
             return -1;
@@ -124,7 +124,7 @@ static int write_app_back(uint8_t *data, uint32_t offset, uint32_t len)
     // Program
     for (uint32_t i = 0; i < len; i++) {
         addr = APP_BACK_ADDR + offset + 4 * i;
-        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGAERR | FMC_FLAG_PGERR);
+        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGSERR);
         status = fmc_word_program(addr, word[i]);
         if (status != FMC_READY) {
             fmc_lock();

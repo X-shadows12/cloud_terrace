@@ -1,12 +1,12 @@
 /*
     Copyright 2021 codenocold codenocold@qq.com
-    Address : https://github.com/codenocold/dgm
-    This file is part of the dgm firmware.
-    The dgm firmware is free software: you can redistribute it and/or modify
+    Address : https://github.com/codenocold/ctm
+    This file is part of the ctm firmware.
+    The ctm firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    The dgm firmware is distributed in the hope that it will be useful,
+    The ctm firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -223,6 +223,8 @@ static void exit_state(void)
 
 void MCT_high_frequency_task(void)
 {
+    static uint8_t rtt_scope_div = 0U;
+
     /* state transition management */
     if (mFSM.state_next != mFSM.state) {
         exit_state();
@@ -239,6 +241,11 @@ void MCT_high_frequency_task(void)
     Foc.i_a = read_iphase_a();
     Foc.i_b = read_iphase_b();
     Foc.i_c = -(Foc.i_a + Foc.i_b);
+
+    if (++rtt_scope_div >= 20U) {
+        rtt_scope_div = 0U;
+        RTT_scope_write6(Foc.i_a, Foc.i_b, Foc.i_c, Foc.v_bus_filt, Encoder.pos, Encoder.vel);
+    }
 
     switch (mFSM.state) {
     case BOOT_UP:

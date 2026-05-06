@@ -1,8 +1,26 @@
 # IDE settings
 .vscode/
+.codex/
+__pycache__/
+*.py[cod]
 
 # Keil/MDK generated files
 list/
 object/
 JLinkLog.txt
-*.uvguix.PC
+JLinkSettings.ini
+*.uvguix.*
+*.uvoptx
+*.lksscope
+*.scvd
+
+# Firmware build outputs
+Firmware/Release/
+*.axf
+*.bin
+*.hex
+
+# Host tool build outputs
+HostTool/build/
+HostTool/dist/
+HostTool/*.spec

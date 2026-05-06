@@ -1,12 +1,12 @@
 /*
     Copyright 2021 codenocold codenocold@qq.com
-    Address : https://github.com/codenocold/dgm
-    This file is part of the dgm firmware.
-    The dgm firmware is free software: you can redistribute it and/or modify
+    Address : https://github.com/codenocold/ctm
+    This file is part of the ctm firmware.
+    The ctm firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    The dgm firmware is distributed in the hope that it will be useful,
+    The ctm firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -19,8 +19,8 @@
 
 #include "main.h"
 
-#define ENCODER_CPR     (int) 16384
-#define ENCODER_CPR_F   (16384.0f)
+#define ENCODER_CPR     (int) 32768
+#define ENCODER_CPR_F   (32768.0f)
 #define ENCODER_CPR_DIV (ENCODER_CPR >> 1)
 
 typedef struct sEncoder
@@ -46,12 +46,21 @@ typedef struct sEncoder
     float pll_ki;
     float interpolation;
     float snap_threshold;
+
+    uint8_t pwm_valid;
+    uint32_t pwm_period_cycles;
+    uint32_t pwm_high_cycles;
 } tEncoder;
 
 extern tEncoder Encoder;
 
 void ENCODER_init(void);
+void ENCODER_hw_init(void);
 bool ENCODER_sample(void);
+#if (CTM_H759_ENCODER_INTERFACE == CTM_H759_ENCODER_IF_PWM)
+void ENCODER_pwm_capture_callback(uint16_t capture);
+void ENCODER_pwm_capture_overrun_callback(void);
+#endif
 void ENCODER_loop(void);
 
 #endif

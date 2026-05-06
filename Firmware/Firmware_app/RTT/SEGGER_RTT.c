@@ -75,6 +75,7 @@ Additional information:
 */
 
 #include "SEGGER_RTT.h"
+#include "rtt_mem.h"
 
 #include <string.h>                 // for memcpy
 
@@ -277,9 +278,9 @@ static const unsigned char _aTerminalId[16] = { '0', '1', '2', '3', '4', '5', '6
     #error "Don't know how to place _SEGGER_RTT, _acUpBuffer, _acDownBuffer cache-line aligned"
   #endif
 #else
-  SEGGER_RTT_PUT_CB_SECTION(SEGGER_RTT_CB_ALIGN(SEGGER_RTT_CB _SEGGER_RTT));
-  SEGGER_RTT_PUT_BUFFER_SECTION(SEGGER_RTT_BUFFER_ALIGN(static char _acUpBuffer  [BUFFER_SIZE_UP]));
-  SEGGER_RTT_PUT_BUFFER_SECTION(SEGGER_RTT_BUFFER_ALIGN(static char _acDownBuffer[BUFFER_SIZE_DOWN]));
+  SEGGER_RTT_CB _SEGGER_RTT __attribute__((section(RTT_SEGGER_CB_SECTION), aligned(32)));
+  static char   _acUpBuffer  [BUFFER_SIZE_UP]   __attribute__((section(RTT_SEGGER_UP0_SECTION), aligned(32)));
+  static char   _acDownBuffer[BUFFER_SIZE_DOWN] __attribute__((section(RTT_SEGGER_DOWN0_SECTION), aligned(32)));
 #endif
 
 static unsigned char _ActiveTerminal;

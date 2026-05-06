@@ -1,12 +1,12 @@
 /*
     Copyright 2021 codenocold codenocold@qq.com
-    Address : https://github.com/codenocold/dgm
-    This file is part of the dgm firmware.
-    The dgm firmware is free software: you can redistribute it and/or modify
+    Address : https://github.com/codenocold/ctm
+    This file is part of the ctm firmware.
+    The ctm firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    The dgm firmware is distributed in the hope that it will be useful,
+    The ctm firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -23,29 +23,21 @@ int16_t  phase_b_adc_offset = 0;
 void PWMC_init(void)
 {
     /* Disable ADC interrupt */
-    adc_interrupt_disable(ADC0, ADC_INT_EOIC);
-    adc_interrupt_flag_clear(ADC0, ADC_INT_FLAG_EOIC);
+    adc_interrupt_disable(CTM_H759_PHASE_ADC, ADC_INT_EOIC);
+    adc_interrupt_flag_clear(CTM_H759_PHASE_ADC, ADC_INT_FLAG_EOIC);
 
-    /* enable ADC0 */
-    adc_enable(ADC0);
-    /* Wait ADC0 startup */
+    /* enable phase-current ADC */
+    adc_enable(CTM_H759_PHASE_ADC);
+    /* Wait ADC startup */
     delay_ms(1);
-    /* ADC0 calibration */
-    adc_calibration_enable(ADC0);
+    /* ADC calibration */
+    adc_calibration_mode_config(CTM_H759_PHASE_ADC, ADC_CALIBRATION_OFFSET);
+    adc_calibration_number(CTM_H759_PHASE_ADC, ADC_CALIBRATION_NUM1);
+    adc_calibration_enable(CTM_H759_PHASE_ADC);
 
-    /* ADC software trigger enable */
-    adc_software_trigger_enable(ADC0, ADC_REGULAR_CHANNEL);
-
-    /* ADC0 inject convert complete interrupt */
-    adc_interrupt_flag_clear(ADC0, ADC_INT_FLAG_EOIC);
-    adc_interrupt_enable(ADC0, ADC_INT_EOIC);
-
-    /* enable ADC1 */
-    adc_enable(ADC1);
-    /* Wait ADC1 startup */
-    delay_ms(1);
-    /* ADC1 calibration */
-    adc_calibration_enable(ADC1);
+    /* Phase-current injected convert complete interrupt */
+    adc_interrupt_flag_clear(CTM_H759_PHASE_ADC, ADC_INT_FLAG_EOIC);
+    adc_interrupt_enable(CTM_H759_PHASE_ADC, ADC_INT_EOIC);
 
     /* Hold TIMER0 counter when core is halted */
     dbg_periph_enable(DBG_TIMER0_HOLD);
@@ -53,7 +45,7 @@ void PWMC_init(void)
     /* Enable TIMER0 counter */
     timer_enable(TIMER0);
 
-    timer_repetition_value_config(TIMER0, 1);
+    timer_repetition_value_config(TIMER0, TIMER_CREP0_ENABLE, 1);
 
     /* Set all duty to 50% */
     set_a_duty(((uint32_t) HALF_PWM_PERIOD_CYCLES / (uint32_t) 2));

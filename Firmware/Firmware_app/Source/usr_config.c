@@ -1,12 +1,12 @@
 /*
     Copyright 2021 codenocold codenocold@qq.com
-    Address : https://github.com/codenocold/dgm
-    This file is part of the dgm firmware.
-    The dgm firmware is free software: you can redistribute it and/or modify
+    Address : https://github.com/codenocold/ctm
+    This file is part of the ctm firmware.
+    The ctm firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    The dgm firmware is distributed in the hope that it will be useful,
+    The ctm firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -23,6 +23,25 @@
 tUsrConfig   UsrConfig;
 tCoggingMap *pCoggingMap = NULL;
 
+#define DCACHE_LINE_SIZE 32U
+
+static void USR_CONFIG_invalidate_flash_cache(uint32_t addr, uint32_t size)
+{
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+    if (size == 0U) {
+        return;
+    }
+
+    uint32_t start = addr & ~(DCACHE_LINE_SIZE - 1U);
+    uint32_t end   = (addr + size + DCACHE_LINE_SIZE - 1U) & ~(DCACHE_LINE_SIZE - 1U);
+
+    SCB_InvalidateDCache_by_Addr((uint32_t *) start, (int32_t) (end - start));
+#else
+    (void) addr;
+    (void) size;
+#endif
+}
+
 void USR_CONFIG_set_default_config(void)
 {
     // Motor
@@ -34,7 +53,7 @@ void USR_CONFIG_set_default_config(void)
     UsrConfig.velocity_limit         = 60;
 
     // Encoder
-    UsrConfig.calib_current = 3.0f;
+    UsrConfig.calib_current = 0.3f;
     UsrConfig.calib_voltage = 3.0f;
 
     // Controller
@@ -56,7 +75,7 @@ void USR_CONFIG_set_default_config(void)
     UsrConfig.profile_decel          = 50;
 
     // Protect
-    UsrConfig.protect_under_voltage = 12;
+    UsrConfig.protect_under_voltage = 6;
     UsrConfig.protect_over_voltage  = 30;
     UsrConfig.protect_over_current  = 8;
     UsrConfig.protect_drv_over_tmp  = 80;
@@ -81,8 +100,8 @@ int USR_CONFIG_erease_config(void)
 
     // Erase
     for (addr = USR_CONFIG_ADDR; addr < (USR_CONFIG_ADDR + USR_CONFIG_MAX_SIZE); addr += PAGE_SIZE) {
-        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGAERR | FMC_FLAG_PGERR);
-        status = fmc_page_erase(addr);
+        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGSERR);
+        status = fmc_sector_erase(addr);
         if (status != FMC_READY) {
             fmc_lock();
             return -1;
@@ -90,6 +109,8 @@ int USR_CONFIG_erease_config(void)
     }
 
     fmc_lock();
+
+    USR_CONFIG_invalidate_flash_cache(USR_CONFIG_ADDR, USR_CONFIG_MAX_SIZE);
 
     // Check
     for (addr = USR_CONFIG_ADDR; addr < (USR_CONFIG_ADDR + USR_CONFIG_MAX_SIZE); addr += 4) {
@@ -129,7 +150,7 @@ int USR_CONFIG_save_config(void)
     UsrConfig.crc   = crc32((uint8_t *) &UsrConfig, sizeof(tUsrConfig) - 4);
     uint32_t *pData = (uint32_t *) &UsrConfig;
     for (int i = 0; i < sizeof(tUsrConfig) / 4; i++) {
-        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGAERR | FMC_FLAG_PGERR);
+        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGSERR);
         if (FMC_READY != fmc_word_program(USR_CONFIG_ADDR + i * 4, *(pData + i))) {
             fmc_lock();
             return -2;
@@ -137,6 +158,8 @@ int USR_CONFIG_save_config(void)
     }
 
     fmc_lock();
+
+    USR_CONFIG_invalidate_flash_cache(USR_CONFIG_ADDR, USR_CONFIG_MAX_SIZE);
 
     return 0;
 }
@@ -161,8 +184,8 @@ int USR_CONFIG_erease_cogging_map(void)
 
     // Erase
     for (addr = COGGING_MAP_ADDR; addr < (COGGING_MAP_ADDR + COGGING_MAP_MAX_SIZE); addr += PAGE_SIZE) {
-        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGAERR | FMC_FLAG_PGERR);
-        status = fmc_page_erase(addr);
+        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGSERR);
+        status = fmc_sector_erase(addr);
         if (status != FMC_READY) {
             fmc_lock();
             return -1;
@@ -170,6 +193,8 @@ int USR_CONFIG_erease_cogging_map(void)
     }
 
     fmc_lock();
+
+    USR_CONFIG_invalidate_flash_cache(COGGING_MAP_ADDR, COGGING_MAP_MAX_SIZE);
 
     // Check
     for (addr = COGGING_MAP_ADDR; addr < (COGGING_MAP_ADDR + COGGING_MAP_MAX_SIZE); addr += 4) {
@@ -213,7 +238,7 @@ int USR_CONFIG_save_cogging_map(void)
     pCoggingMap->crc = crc32((uint8_t *) pCoggingMap, sizeof(tCoggingMap) - 4);
     uint32_t *pData  = (uint32_t *) pCoggingMap;
     for (int i = 0; i < sizeof(tCoggingMap) / 4; i++) {
-        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGAERR | FMC_FLAG_PGERR);
+        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGSERR);
         if (FMC_READY != fmc_word_program(COGGING_MAP_ADDR + i * 4, *(pData + i))) {
             fmc_lock();
             return -2;
@@ -221,6 +246,8 @@ int USR_CONFIG_save_cogging_map(void)
     }
 
     fmc_lock();
+
+    USR_CONFIG_invalidate_flash_cache(COGGING_MAP_ADDR, COGGING_MAP_MAX_SIZE);
 
     return 0;
 }

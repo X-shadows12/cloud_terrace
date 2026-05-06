@@ -1,12 +1,12 @@
 /*
     Copyright 2021 codenocold codenocold@qq.com
-    Address : https://github.com/codenocold/dgm
-    This file is part of the dgm firmware.
-    The dgm firmware is free software: you can redistribute it and/or modify
+    Address : https://github.com/codenocold/ctm
+    This file is part of the ctm firmware.
+    The ctm firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    The dgm firmware is distributed in the hope that it will be useful,
+    The ctm firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -24,16 +24,18 @@
 #define CURRENT_MEASURE_HZ     PWM_FREQUENCY
 #define CURRENT_MEASURE_PERIOD (float) (1.0f / (float) CURRENT_MEASURE_HZ)
 
-#define TIMER0_CLK_MHz         120
+#define TIMER0_CLK_MHz         300
 #define PWM_PERIOD_CYCLES      (uint16_t) ((TIMER0_CLK_MHz * (uint32_t) 1000000u / ((uint32_t) (PWM_FREQUENCY))) & 0xFFFE)
 #define HALF_PWM_PERIOD_CYCLES (uint16_t) (PWM_PERIOD_CYCLES / 2U)
 
-#define SHUNT_RESISTENCE       (0.01f)
-#define V_SCALE                ((float) (16.0f * 3.3f / 4095.0f))
-#define I_SCALE                ((float) ((3.3f / 4095.0f) / SHUNT_RESISTENCE / 15.0f))
+#define SHUNT_RESISTENCE       (0.05f)
+#define CURRENT_AMP_GAIN       (20.0f)
+#define VBUS_DIVIDER_GAIN      (11.0f)
+#define V_SCALE                ((float) (VBUS_DIVIDER_GAIN * 3.3f / 4095.0f))
+#define I_SCALE                ((float) ((3.3f / 4095.0f) / SHUNT_RESISTENCE / CURRENT_AMP_GAIN))
 
-#define READ_IPHASE_A_ADC()    ((uint16_t) (ADC_IDATA0(ADC0)))
-#define READ_IPHASE_B_ADC()    ((uint16_t) (ADC_IDATA0(ADC1)))
+#define READ_IPHASE_A_ADC()    ((uint16_t) (ADC_IDATA0(CTM_H759_PHASE_ADC)))
+#define READ_IPHASE_B_ADC()    ((uint16_t) (ADC_IDATA1(CTM_H759_PHASE_ADC)))
 
 extern uint16_t adc_buff[3];
 extern int16_t  phase_a_adc_offset;
@@ -53,44 +55,72 @@ static const int16_t temp_table[]
        -18, -19, -19, -20, -21, -21, -22, -23, -24, -25, -26, -26, -27, -28, -29, -30, -31, -32, -33, -35, -36, -37,
        -38, -40, -41, -43, -45, -47, -49, -51, -54, -57, -61, -65, -72, -82};
 
+static inline void update_vbus_adc_sample(void)
+{
+#if CTM_H759_HAS_VBUS_ADC
+    if (SET == adc_flag_get(CTM_H759_VBUS_ADC, ADC_FLAG_ROVF)) {
+        adc_flag_clear(CTM_H759_VBUS_ADC, ADC_FLAG_ROVF);
+    }
+
+    if (SET == adc_flag_get(CTM_H759_VBUS_ADC, ADC_FLAG_EOC)) {
+        adc_buff[0] = (uint16_t) adc_regular_data_read(CTM_H759_VBUS_ADC);
+        adc_flag_clear(CTM_H759_VBUS_ADC, ADC_FLAG_EOC);
+        adc_software_trigger_enable(CTM_H759_VBUS_ADC, ADC_REGULAR_CHANNEL);
+    }
+#endif
+}
+
 static inline float read_vbus(void)
 {
+#if CTM_H759_HAS_VBUS_ADC
+    update_vbus_adc_sample();
     return (float) (adc_buff[0]) * V_SCALE;
+#else
+    return CTM_H759_NOMINAL_VBUS;
+#endif
 }
 
 static inline int read_drv_temp(void)
 {
+#if CTM_H759_HAS_TEMP_ADC
     return temp_table[adc_buff[1] >> 4];
+#else
+    return CTM_H759_DEFAULT_DRV_TEMP;
+#endif
 }
 
 static inline int read_ntc_temp(void)
 {
+#if CTM_H759_HAS_TEMP_ADC
     return temp_table[adc_buff[2] >> 4];
+#else
+    return CTM_H759_DEFAULT_NTC_TEMP;
+#endif
 }
 
 static inline float read_iphase_a(void)
 {
-    return (float) (READ_IPHASE_A_ADC() - phase_a_adc_offset) * I_SCALE;
+    return (float) (phase_a_adc_offset - READ_IPHASE_A_ADC()) * I_SCALE;
 }
 
 static inline float read_iphase_b(void)
 {
-    return (float) (READ_IPHASE_B_ADC() - phase_b_adc_offset) * I_SCALE;
+    return (float) (phase_b_adc_offset - READ_IPHASE_B_ADC()) * I_SCALE;
 }
 
 static inline void set_a_duty(uint32_t duty)
 {
-    TIMER_CH2CV(TIMER0) = duty;
+    CTM_H759_PWM_PHASE_A_CV = duty;
 }
 
 static inline void set_b_duty(uint32_t duty)
 {
-    TIMER_CH1CV(TIMER0) = duty;
+    CTM_H759_PWM_PHASE_B_CV = duty;
 }
 
 static inline void set_c_duty(uint32_t duty)
 {
-    TIMER_CH0CV(TIMER0) = duty;
+    CTM_H759_PWM_PHASE_C_CV = duty;
 }
 
 void PWMC_init(void);

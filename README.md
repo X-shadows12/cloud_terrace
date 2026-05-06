@@ -2,10 +2,10 @@
 
 ## 仓库文件结构
 
-- [Firmware](https://github.com/codenocold/dgm/tree/main/Firmware)：dgm驱动器固件源码
-- [Hardware](https://github.com/codenocold/dgm/tree/main/Hardware)：电路原理图，3D模型文件
-- [dgm_tool](https://github.com/codenocold/dgm/tree/main/dgm_tool)：dgm_tool 可视化调试软件
-- [dgm驱动器用户手册.pdf](https://github.com/codenocold/dgm/blob/main/dgm%E9%A9%B1%E5%8A%A8%E5%99%A8%E7%94%A8%E6%88%B7%E6%89%8B%E5%86%8C.pdf)：用户使用手册
+- [Firmware](https://github.com/codenocold/ctm/tree/main/Firmware)：ctm驱动器固件源码
+- [Hardware](https://github.com/codenocold/ctm/tree/main/Hardware)：电路原理图，3D模型文件
+- [ctm_tool](https://github.com/codenocold/ctm/tree/main/ctm_tool)：ctm_tool 可视化调试软件
+- [ctm驱动器用户手册.pdf](https://github.com/codenocold/ctm/blob/main/ctm%E9%A9%B1%E5%8A%A8%E5%99%A8%E7%94%A8%E6%88%B7%E6%89%8B%E5%86%8C.pdf)：用户使用手册
 
 **![](img/head_show.jpg)**
 
@@ -19,7 +19,7 @@
 - **支持宽电压范围供电(12V ~ 50V)**
 - **采用 Cortex-M4 带硬件浮点运算器主控**
 - **支持磁编码器和感应磁铁同心度偏移补偿**
-- **配套的 dgm tool 可视化调试软件轻松配置和调试**
+- **配套的 ctm tool 可视化调试软件轻松配置和调试**
 - **支持自动测量电机相关参数并根据电机参数生成电流环控制参数**
 - **基于 12bit ADC 相电流检测，相电流测量范围 -10 ~ +10A，满量程分辨率 5mA**
 - **板载单圈绝对值磁编码器芯片，实现精确位置控制，无需每次上电校准电机编码器**
@@ -55,41 +55,41 @@
 
 ## 安装示意
 
-![](img/dgm_mount.jpg)
+![](img/ctm_mount.jpg)
 
 ## 安装规范
 
 ![](img/mag_install.jpg)
 
-## 使用 dgm tool 调试
+## 使用 ctm tool 调试
 
-**dgm tool 是专门为dgm驱动器开发的一款简单易用的可视化上位机调试软件，目前仅支持通过 [CAN-FD 模块](https://item.taobao.com/item.htm?spm=a230r.1.14.1.458c30e3ims9dC&id=610739408298&ns=1&abbucket=13#detail) 连接电脑使用。**
+**ctm tool 是专门为ctm驱动器开发的一款简单易用的可视化上位机调试软件，目前仅支持通过 [CAN-FD 模块](https://item.taobao.com/item.htm?spm=a230r.1.14.1.458c30e3ims9dC&id=610739408298&ns=1&abbucket=13#detail) 连接电脑使用。**
 
-**dgm tool 适用于 Windows8 及以上64位版本操作系统，双击 dgm_tool 文件夹下的 dgm_tool_x64-X.X.exe运行即可。**
+**ctm tool 适用于 Windows8 及以上64位版本操作系统，双击 ctm_tool 文件夹下的 ctm_tool_x64-X.X.exe运行即可。**
 
-![](img/dgm_con_final.jpg)
+![](img/ctm_con_final.jpg)
 
 ## 调试界面
 
-![](img/dgm_tool_debug.jpg)
+![](img/ctm_tool_debug.jpg)
 
 ## 校准界面
 
-![](img/dgm_tool_calib.jpg)
+![](img/ctm_tool_calib.jpg)
 
 ## 参数配置界面
 
-![](img/dgm_tool_config.jpg)
+![](img/ctm_tool_config.jpg)
 
 ## 固件升级界面
 
-![](img/dgm_tool_dfu.jpg)
+![](img/ctm_tool_dfu.jpg)
 
 ## keil mdk 固件源代码
 
 ![](img/keil.jpg)
 
-## dgm 驱动板原理图
+## ctm 驱动板原理图
 
 ![](img/sch.png)
 
@@ -110,6 +110,6 @@
 | **磁极对数** | **4**       |
 | **电机重量** | **0.45Kg**  |
 
-## dgm 驱动板购买链接
+## ctm 驱动板购买链接
 
 - **暴风电子@taobao：**[购买链接](https://item.taobao.com/item.htm?ft=t&id=645970525370)

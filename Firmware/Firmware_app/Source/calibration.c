@@ -1,12 +1,12 @@
 /*
     Copyright 2021 codenocold codenocold@qq.com
-    Address : https://github.com/codenocold/dgm
-    This file is part of the dgm firmware.
-    The dgm firmware is free software: you can redistribute it and/or modify
+    Address : https://github.com/codenocold/ctm
+    This file is part of the ctm firmware.
+    The ctm firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    The dgm firmware is distributed in the hope that it will be useful,
+    The ctm firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -56,6 +56,8 @@ static tCalibStep mCalibStep  = CS_NULL;
 
 void CALIBRATION_start(void)
 {
+    DEBUG("[CAL] start\r\n");
+
     // free
     if (pCoggingMap != NULL) {
         AnticoggingValid = false;
@@ -109,14 +111,14 @@ void CALIBRATION_loop(void)
 
     static const float calib_phase_vel = M_PI;
 
-    static float phase_set;
-    static float start_count;
+    static float   phase_set;
+    static int64_t start_count;
 
     static int16_t sample_count;
     static float   next_sample_time;
 
     float       time    = (float) loop_count * CURRENT_MEASURE_PERIOD;
-    const float voltage = UsrConfig.calib_current * UsrConfig.motor_phase_resistance * 3.0f / 2.0f;
+    const float voltage = fabsf(UsrConfig.calib_current * UsrConfig.motor_phase_resistance * 3.0f / 2.0f);
 
     switch (mCalibStep) {
     case CS_NULL:
@@ -142,6 +144,7 @@ void CALIBRATION_loop(void)
 
     case CS_MOTOR_R_END:
         UsrConfig.motor_phase_resistance = (voltages[0] / UsrConfig.calib_current) * 2.0f / 3.0f;
+        DEBUG("[CAL] R=%d mOhm\r\n", (int) (UsrConfig.motor_phase_resistance * 1000.0f));
         {
             uint8_t data[4];
             float_to_data(UsrConfig.motor_phase_resistance, data);
@@ -177,6 +180,9 @@ void CALIBRATION_loop(void)
         float dI_by_dt                   = (Ialphas[1] - Ialphas[0]) / (float) (CURRENT_MEASURE_PERIOD * num_L_cycles);
         float L                          = UsrConfig.calib_voltage / dI_by_dt;
         UsrConfig.motor_phase_inductance = L * 2.0f / 3.0f;
+        DEBUG("[CAL] L=%d uH dI_dt=%d\r\n",
+              (int) (UsrConfig.motor_phase_inductance * 1000000.0f),
+              (int) dI_by_dt);
         FOC_update_current_ctrl_gain(UsrConfig.current_ctrl_bw);
 
         uint8_t data[4];
@@ -191,7 +197,7 @@ void CALIBRATION_loop(void)
     case CS_DIR_PP_START:
         FOC_voltage((voltage * time / 2.0f), 0, phase_set);
         if (time >= 2.0f) {
-            start_count = (float) Encoder.shadow_count;
+            start_count = Encoder.shadow_count;
             mCalibStep  = CS_DIR_PP_LOOP;
             break;
         }
@@ -206,7 +212,21 @@ void CALIBRATION_loop(void)
         break;
 
     case CS_DIR_PP_END: {
-        int32_t diff = Encoder.shadow_count - start_count;
+        int64_t diff = Encoder.shadow_count - start_count;
+        float   elec_revs;
+        float   mech_revs;
+        int64_t abs_diff;
+
+        abs_diff  = (diff >= 0) ? diff : -diff;
+        mech_revs = (float) abs_diff / ENCODER_CPR_F;
+        elec_revs = fabsf(phase_set) / M_2PI;
+
+        if (mech_revs < 0.001f) {
+            DEBUG("[CAL] PP fail no motion diff=%d\r\n", (int) diff);
+            StatuswordNew.errors.selftest = 1;
+            MCT_set_state(IDLE);
+            break;
+        }
 
         // Check direction
         if (diff > 0) {
@@ -215,8 +235,21 @@ void CALIBRATION_loop(void)
             UsrConfig.encoder_dir = -1;
         }
 
-        // Motor pole pairs
-        UsrConfig.motor_pole_pairs = round(8.0f / ABS(diff / ENCODER_CPR_F));
+        // Motor pole pairs are estimated from motion magnitude only;
+        // direction is handled separately above.
+        UsrConfig.motor_pole_pairs = (int32_t) roundf(elec_revs / mech_revs);
+        DEBUG("[CAL] PP diff=%d elec_x1000=%d mech_x1000=%d pp=%d dir=%d\r\n",
+              (int) diff,
+              (int) (elec_revs * 1000.0f),
+              (int) (mech_revs * 1000.0f),
+              (int) UsrConfig.motor_pole_pairs,
+              (int) UsrConfig.encoder_dir);
+        if (UsrConfig.motor_pole_pairs < 2 || UsrConfig.motor_pole_pairs > (int32_t) MAX_MOTOR_POLE_PAIRS) {
+            DEBUG("[CAL] PP fail out of range\r\n");
+            StatuswordNew.errors.selftest = 1;
+            MCT_set_state(IDLE);
+            break;
+        }
 
         {
             uint8_t data[4];
@@ -293,6 +326,7 @@ void CALIBRATION_loop(void)
             moving_avg += p_error_arr[i];
         }
         UsrConfig.encoder_offset = moving_avg / (UsrConfig.motor_pole_pairs * SAMPLES_PER_PPAIR);
+        DEBUG("[CAL] offset=%d\r\n", (int) UsrConfig.encoder_offset);
 
         {
             uint8_t data[4];
@@ -342,6 +376,7 @@ void CALIBRATION_loop(void)
         } else {
             mCalibStep            = CS_NULL;
             UsrConfig.calib_valid = true;
+            DEBUG("[CAL] done\r\n");
             MCT_set_state(IDLE);
         }
         break;

@@ -1,12 +1,12 @@
 /*
     Copyright 2021 codenocold codenocold@qq.com
-    Address : https://github.com/codenocold/dgm
-    This file is part of the dgm firmware.
-    The dgm firmware is free software: you can redistribute it and/or modify
+    Address : https://github.com/codenocold/ctm
+    This file is part of the ctm firmware.
+    The ctm firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    The dgm firmware is distributed in the hope that it will be useful,
+    The ctm firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -22,178 +22,251 @@
 #include "foc.h"
 #include "mc_task.h"
 #include "pwm_curr.h"
+#include "rtt_mem.h"
 #include "usr_config.h"
 
 volatile uint32_t SystickCount = 0;
 
+static void cache_enable(void)
+{
+    SCB_EnableICache();
+    SCB_EnableDCache();
+}
+
+static void rtt_mpu_enable(void)
+{
+    const uint32_t rtt_mpu_region = 0U;
+    const uint32_t rtt_mpu_rasr =
+        (1UL << MPU_RASR_XN_Pos) |
+        (ARM_MPU_AP_FULL << MPU_RASR_AP_Pos) |
+        (1UL << MPU_RASR_TEX_Pos) |
+        (1UL << MPU_RASR_S_Pos) |
+        (ARM_MPU_REGION_SIZE_16KB << MPU_RASR_SIZE_Pos) |
+        MPU_RASR_ENABLE_Msk;
+
+    /* Keep the RTT window non-cacheable so the probe and CPU see the same bytes. */
+    ARM_MPU_Disable();
+    ARM_MPU_SetRegionEx(rtt_mpu_region, ARM_MPU_RBAR(rtt_mpu_region, RTT_RAM_BASE), rtt_mpu_rasr);
+    ARM_MPU_Enable(MPU_CTRL_PRIVDEFENA_Msk);
+}
+
+#if (CTM_H759_ENCODER_INTERFACE == CTM_H759_ENCODER_IF_SPI)
+static void gpio_output_pp(uint32_t port, uint32_t pin)
+{
+    gpio_mode_set(port, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, pin);
+    gpio_output_options_set(port, GPIO_OTYPE_PP, GPIO_OSPEED_60MHZ, pin);
+}
+#endif
+
+static void gpio_af_pp(uint32_t port, uint32_t pin, uint32_t af)
+{
+    gpio_af_set(port, af, pin);
+    gpio_mode_set(port, GPIO_MODE_AF, GPIO_PUPD_NONE, pin);
+    gpio_output_options_set(port, GPIO_OTYPE_PP, GPIO_OSPEED_60MHZ, pin);
+}
+
+#if (CTM_H759_ENCODER_INTERFACE == CTM_H759_ENCODER_IF_PWM)
+static void gpio_af_input(uint32_t port, uint32_t pin, uint32_t af, uint32_t pupd)
+{
+    gpio_af_set(port, af, pin);
+    gpio_mode_set(port, GPIO_MODE_AF, pupd, pin);
+}
+#endif
+
+static void gpio_analog(uint32_t port, uint32_t pin)
+{
+    gpio_mode_set(port, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, pin);
+}
+
+static void gpio_input(uint32_t port, uint32_t pin)
+{
+    gpio_mode_set(port, GPIO_MODE_INPUT, GPIO_PUPD_NONE, pin);
+}
+
 static void RCU_init(void)
 {
-    rcu_periph_clock_enable(RCU_AF);
-
     /* enable GPIO clock */
     rcu_periph_clock_enable(RCU_GPIOA);
     rcu_periph_clock_enable(RCU_GPIOB);
     rcu_periph_clock_enable(RCU_GPIOC);
+    rcu_periph_clock_enable(RCU_GPIOD);
+    rcu_periph_clock_enable(RCU_GPIOE);
+    rcu_periph_clock_enable(RCU_GPIOF);
+    rcu_periph_clock_enable(RCU_GPIOG);
+    rcu_periph_clock_enable(RCU_GPIOJ);
+    rcu_periph_clock_enable(RCU_GPIOK);
+
+    rcu_periph_clock_enable(RCU_SYSCFG);
 
     /* enable TIMER clock */
     rcu_periph_clock_enable(RCU_TIMER0);
     rcu_periph_clock_enable(RCU_TIMER1);
+#if (CTM_H759_ENCODER_INTERFACE == CTM_H759_ENCODER_IF_PWM)
+    rcu_periph_clock_enable(RCU_TIMER3);
+#endif
+    rcu_timer_clock_prescaler_config(RCU_TIMER_PSC_MUL2);
 
-    /* enable ADC clock */
-    rcu_periph_clock_enable(RCU_ADC0);
-    rcu_periph_clock_enable(RCU_ADC1);
-    // ADC clock = 30M (APB2 = 120M, ADC clock MAX 40M)
-    rcu_adc_clock_config(RCU_CKADC_CKAPB2_DIV4);
+    /* enable phase-current ADC clock */
+    rcu_periph_clock_enable(CTM_H759_PHASE_ADC_RCU);
+    rcu_adc_clock_config(CTM_H759_PHASE_ADC_IDX, RCU_ADCSRC_PER);
 
-    /* enable DMA0 clock */
-    rcu_periph_clock_enable(RCU_DMA0);
+#if CTM_H759_HAS_VBUS_ADC
+    /* enable DC-bus voltage ADC clock */
+    rcu_periph_clock_enable(CTM_H759_VBUS_ADC_RCU);
+    rcu_adc_clock_config(CTM_H759_VBUS_ADC_IDX, RCU_ADCSRC_PER);
+#endif
 
-    /* enable CAN0 clock */
-    rcu_periph_clock_enable(RCU_CAN0);
+    /* enable trigger selector */
+    rcu_periph_clock_enable(RCU_TRIGSEL);
 
-    /* enable SPI2 clock */
-    rcu_periph_clock_enable(RCU_SPI2);
+    /* enable CAN2 clock */
+    rcu_periph_clock_enable(RCU_CAN2);
+    rcu_can_clock_config(CTM_H759_CAN_IDX, RCU_CANSRC_APB2);
+
+#if (CTM_H759_ENCODER_INTERFACE == CTM_H759_ENCODER_IF_SPI)
+    /* enable SPI0 clock */
+    rcu_periph_clock_enable(RCU_SPI0);
+    rcu_spi_clock_config(IDX_SPI0, RCU_SPISRC_PLL0Q);
+#endif
 }
 
 static void GPIO_init(void)
 {
-    // LED ACT PC13
-    gpio_bit_reset(GPIOC, GPIO_PIN_13);
-    gpio_init(GPIOC, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_13);
+    /* User keys from the schematic: KEY1/PA0, KEY2/PC0. */
+    gpio_input(CTM_H759_KEY1_PORT, CTM_H759_KEY1_PIN);
+    gpio_input(CTM_H759_KEY2_PORT, CTM_H759_KEY2_PIN);
 
-    // ADC
-    gpio_init(GPIOA, GPIO_MODE_AIN, GPIO_OSPEED_MAX, GPIO_PIN_0); // IA   - PA0 - ADC01_IN0
-    gpio_init(GPIOA, GPIO_MODE_AIN, GPIO_OSPEED_MAX, GPIO_PIN_1); // IB   - PA1 - ADC01_IN1
-    gpio_init(GPIOA, GPIO_MODE_AIN, GPIO_OSPEED_MAX, GPIO_PIN_3); // VBUS - PA3 - ADC01_IN3
-    gpio_init(GPIOB, GPIO_MODE_AIN, GPIO_OSPEED_MAX, GPIO_PIN_0); // TMP1 - PB0 - ADC01_IN8
-    gpio_init(GPIOB, GPIO_MODE_AIN, GPIO_OSPEED_MAX, GPIO_PIN_1); // TMP2 - PB1 - ADC01_IN9
+#if defined(CTM_H759_PHASE_A_ANALOG_SWITCH)
+    syscfg_analog_switch_enable(CTM_H759_PHASE_A_ANALOG_SWITCH);
+#endif
+#if defined(CTM_H759_PHASE_B_ANALOG_SWITCH)
+    syscfg_analog_switch_enable(CTM_H759_PHASE_B_ANALOG_SWITCH);
+#endif
 
-    // FOC PWM
-    gpio_init(GPIOA, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_8);  // CH PA8
-    gpio_init(GPIOA, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_9);  // BH PA9
-    gpio_init(GPIOA, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_10); // AH PA10
-    gpio_init(GPIOB, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_13); // CL PB13
-    gpio_init(GPIOB, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_14); // BL PB14
-    gpio_init(GPIOB, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_15); // AL PB13
+    /* Phase current ADC */
+    gpio_analog(CTM_H759_PHASE_A_PORT, CTM_H759_PHASE_A_PIN);
+    gpio_analog(CTM_H759_PHASE_B_PORT, CTM_H759_PHASE_B_PIN);
 
-    /* configure CAN0 GPIO */
-    gpio_pin_remap_config(GPIO_CAN0_PARTIAL_REMAP, ENABLE);
-    gpio_init(GPIOB, GPIO_MODE_IPU, GPIO_OSPEED_50MHZ, GPIO_PIN_8);   // CAN0_RX PB8
-    gpio_init(GPIOB, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_9); // CAN0_TX PB9
+#if CTM_H759_HAS_VBUS_ADC
+    /* DC-bus voltage ADC */
+    gpio_analog(CTM_H759_VBUS_PORT, CTM_H759_VBUS_PIN);
+#endif
 
-    /* SPI2 */
-    gpio_pin_remap_config(GPIO_SWJ_SWDPENABLE_REMAP, ENABLE);
-    // ENC_nCS PB6
-    gpio_bit_set(GPIOB, GPIO_PIN_6);
-    gpio_init(GPIOB, GPIO_MODE_OUT_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_6);
-    // SCK/PB3, MISO/PB4, MOSI/PB5
-    gpio_init(GPIOB, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_3 | GPIO_PIN_5);
-    gpio_init(GPIOB, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, GPIO_PIN_4);
+    /* FOC PWM */
+    gpio_af_pp(CTM_H759_PWM_CH0_PORT, CTM_H759_PWM_CH0_PIN, CTM_H759_PWM_AF);
+    gpio_af_pp(CTM_H759_PWM_MCH0_PORT, CTM_H759_PWM_MCH0_PIN, CTM_H759_PWM_AF);
+    gpio_af_pp(CTM_H759_PWM_CH1_PORT, CTM_H759_PWM_CH1_PIN, CTM_H759_PWM_AF);
+    gpio_af_pp(CTM_H759_PWM_MCH1_PORT, CTM_H759_PWM_MCH1_PIN, CTM_H759_PWM_AF);
+    gpio_af_pp(CTM_H759_PWM_CH2_PORT, CTM_H759_PWM_CH2_PIN, CTM_H759_PWM_AF);
+    gpio_af_pp(CTM_H759_PWM_MCH2_PORT, CTM_H759_PWM_MCH2_PIN, CTM_H759_PWM_AF);
+
+#if (CTM_H759_ENCODER_INTERFACE == CTM_H759_ENCODER_IF_SPI)
+    /* SPI0 encoder / external SPI bus */
+    gpio_af_pp(CTM_H759_SPI0_SCK_PORT, CTM_H759_SPI0_SCK_PIN, CTM_H759_SPI0_AF);
+    gpio_af_pp(CTM_H759_SPI0_MISO_PORT, CTM_H759_SPI0_MISO_PIN, CTM_H759_SPI0_AF);
+    gpio_af_pp(CTM_H759_SPI0_MOSI_PORT, CTM_H759_SPI0_MOSI_PIN, CTM_H759_SPI0_AF);
+
+    gpio_bit_set(CTM_H759_SPI0_CS_X_PORT, CTM_H759_SPI0_CS_X_PIN);
+    gpio_output_pp(CTM_H759_SPI0_CS_X_PORT, CTM_H759_SPI0_CS_X_PIN);
+    gpio_bit_set(CTM_H759_SPI0_CS_R_PORT, CTM_H759_SPI0_CS_R_PIN);
+    gpio_output_pp(CTM_H759_SPI0_CS_R_PORT, CTM_H759_SPI0_CS_R_PIN);
+    gpio_bit_set(CTM_H759_SPI0_CS_L_PORT, CTM_H759_SPI0_CS_L_PIN);
+    gpio_output_pp(CTM_H759_SPI0_CS_L_PORT, CTM_H759_SPI0_CS_L_PIN);
+#elif (CTM_H759_ENCODER_INTERFACE == CTM_H759_ENCODER_IF_PWM)
+    /* PWM encoder input on PB8 / TIMER3_CH2 / AF2 */
+    gpio_af_input(CTM_H759_ENC_PWM_PORT, CTM_H759_ENC_PWM_PIN, CTM_H759_ENC_PWM_AF,
+                  GPIO_PUPD_PULLUP);
+#endif
+
+    /* CAN2 */
+    gpio_af_pp(CTM_H759_CAN_RX_PORT, CTM_H759_CAN_RX_PIN, CTM_H759_CAN_RX_AF);
+    gpio_af_pp(CTM_H759_CAN_TX_PORT, CTM_H759_CAN_TX_PIN, CTM_H759_CAN_TX_AF);
 }
 
-static void SPI2_init(void)
+static void SPI0_init(void)
 {
+#if (CTM_H759_ENCODER_INTERFACE == CTM_H759_ENCODER_IF_SPI)
     spi_parameter_struct spi_init_struct;
 
-    /* deinitilize SPI and the parameters */
-    spi_i2s_deinit(SPI2);
+    spi_i2s_deinit(CTM_H759_ENC_SPI);
     spi_struct_para_init(&spi_init_struct);
 
-    /* SPI1 parameter config */
     spi_init_struct.trans_mode           = SPI_TRANSMODE_FULLDUPLEX;
     spi_init_struct.device_mode          = SPI_MASTER;
-    spi_init_struct.frame_size           = SPI_FRAMESIZE_16BIT;
+    spi_init_struct.data_size            = SPI_DATASIZE_16BIT;
     spi_init_struct.clock_polarity_phase = SPI_CK_PL_HIGH_PH_2EDGE;
     spi_init_struct.nss                  = SPI_NSS_SOFT;
-    spi_init_struct.prescale             = SPI_PSC_8;
+    spi_init_struct.prescale             = SPI_PSC_64;
     spi_init_struct.endian               = SPI_ENDIAN_MSB;
-    spi_init(SPI2, &spi_init_struct);
+    spi_init(CTM_H759_ENC_SPI, &spi_init_struct);
 
-    spi_enable(SPI2);
+    spi_word_access_enable(CTM_H759_ENC_SPI);
+    spi_enable(CTM_H759_ENC_SPI);
+#endif
 }
 
-static void DMA0_init(void)
+static void ADC_PHASE_init(void)
 {
-    /* ADC_DMA_channel configuration */
-    dma_parameter_struct dma_data_parameter;
+    adc_deinit(CTM_H759_PHASE_ADC);
 
-    /* ADC DMA_channel configuration */
-    dma_deinit(DMA0, DMA_CH0);
+    adc_clock_config(CTM_H759_PHASE_ADC, ADC_CLK_SYNC_HCLK_DIV6);
+    adc_special_function_config(CTM_H759_PHASE_ADC, ADC_SCAN_MODE, ENABLE);
+    adc_special_function_config(CTM_H759_PHASE_ADC, ADC_CONTINUOUS_MODE, DISABLE);
+    adc_special_function_config(CTM_H759_PHASE_ADC, ADC_INSERTED_CHANNEL_AUTO, DISABLE);
+    adc_resolution_config(CTM_H759_PHASE_ADC, ADC_RESOLUTION_12B);
+    adc_data_alignment_config(CTM_H759_PHASE_ADC, ADC_DATAALIGN_RIGHT);
 
-    /* initialize DMA single data mode */
-    dma_data_parameter.periph_addr  = (uint32_t) (&ADC_RDATA(ADC0));
-    dma_data_parameter.periph_inc   = DMA_PERIPH_INCREASE_DISABLE;
-    dma_data_parameter.memory_addr  = (uint32_t) (adc_buff);
-    dma_data_parameter.memory_inc   = DMA_MEMORY_INCREASE_ENABLE;
-    dma_data_parameter.periph_width = DMA_PERIPHERAL_WIDTH_16BIT;
-    dma_data_parameter.memory_width = DMA_MEMORY_WIDTH_16BIT;
-    dma_data_parameter.direction    = DMA_PERIPHERAL_TO_MEMORY;
-    dma_data_parameter.number       = 3;
-    dma_data_parameter.priority     = DMA_PRIORITY_HIGH;
-    dma_init(DMA0, DMA_CH0, &dma_data_parameter);
+    adc_channel_length_config(CTM_H759_PHASE_ADC, ADC_INSERTED_CHANNEL, 2U);
+    adc_inserted_channel_config(CTM_H759_PHASE_ADC, 0U, CTM_H759_PHASE_A_ADC_CHANNEL,
+                                CTM_H759_PHASE_ADC_SAMPLE_TIME);
+    adc_inserted_channel_config(CTM_H759_PHASE_ADC, 1U, CTM_H759_PHASE_B_ADC_CHANNEL,
+                                CTM_H759_PHASE_ADC_SAMPLE_TIME);
 
-    dma_circulation_enable(DMA0, DMA_CH0);
+    adc_external_trigger_config(CTM_H759_PHASE_ADC, ADC_INSERTED_CHANNEL, EXTERNAL_TRIGGER_RISING);
+    trigsel_init(CTM_H759_PHASE_TRIGGER_OUTPUT, CTM_H759_PHASE_TRIGGER_INPUT);
 
-    /* enable DMA channel */
-    dma_channel_enable(DMA0, DMA_CH0);
+    adc_interrupt_flag_clear(CTM_H759_PHASE_ADC, ADC_INT_FLAG_EOC);
+    adc_interrupt_flag_clear(CTM_H759_PHASE_ADC, ADC_INT_FLAG_EOIC);
 }
 
-static void ADC0_init(void)
+static void ADC_VBUS_init(void)
 {
-    adc_deinit(ADC0);
+#if CTM_H759_HAS_VBUS_ADC
+    adc_deinit(CTM_H759_VBUS_ADC);
 
-    adc_mode_config(ADC_DAUL_INSERTED_PARALLEL);
+    adc_clock_config(CTM_H759_VBUS_ADC, ADC_CLK_SYNC_HCLK_DIV6);
+    adc_special_function_config(CTM_H759_VBUS_ADC, ADC_SCAN_MODE, DISABLE);
+    adc_special_function_config(CTM_H759_VBUS_ADC, ADC_CONTINUOUS_MODE, DISABLE);
+    adc_special_function_config(CTM_H759_VBUS_ADC, ADC_INSERTED_CHANNEL_AUTO, DISABLE);
+    adc_resolution_config(CTM_H759_VBUS_ADC, ADC_RESOLUTION_12B);
+    adc_data_alignment_config(CTM_H759_VBUS_ADC, ADC_DATAALIGN_RIGHT);
+    adc_channel_length_config(CTM_H759_VBUS_ADC, ADC_REGULAR_CHANNEL, 1U);
+    adc_regular_channel_config(CTM_H759_VBUS_ADC, 0U, CTM_H759_VBUS_ADC_CHANNEL,
+                               CTM_H759_VBUS_ADC_SAMPLE_TIME);
+    adc_external_trigger_config(CTM_H759_VBUS_ADC, ADC_REGULAR_CHANNEL, EXTERNAL_TRIGGER_DISABLE);
+    adc_interrupt_flag_clear(CTM_H759_VBUS_ADC, ADC_INT_FLAG_EOC);
+    adc_interrupt_flag_clear(CTM_H759_VBUS_ADC, ADC_INT_FLAG_ROVF);
 
-    adc_special_function_config(ADC0, ADC_SCAN_MODE, ENABLE);
-    adc_special_function_config(ADC0, ADC_CONTINUOUS_MODE, ENABLE);
-    adc_special_function_config(ADC0, ADC_INSERTED_CHANNEL_AUTO, DISABLE);
-    adc_resolution_config(ADC0, ADC_RESOLUTION_12B);
-    adc_data_alignment_config(ADC0, ADC_DATAALIGN_RIGHT);
+    adc_enable(CTM_H759_VBUS_ADC);
+    delay_ms(1);
+    adc_calibration_mode_config(CTM_H759_VBUS_ADC, ADC_CALIBRATION_OFFSET);
+    adc_calibration_number(CTM_H759_VBUS_ADC, ADC_CALIBRATION_NUM1);
+    adc_calibration_enable(CTM_H759_VBUS_ADC);
 
-    /* ADC DMA function enable */
-    adc_dma_mode_enable(ADC0);
+    adc_flag_clear(CTM_H759_VBUS_ADC, ADC_FLAG_EOC);
+    adc_flag_clear(CTM_H759_VBUS_ADC, ADC_FLAG_ROVF);
+    adc_software_trigger_enable(CTM_H759_VBUS_ADC, ADC_REGULAR_CHANNEL);
 
-    /* ADC inserted channel config */
-    adc_channel_length_config(ADC0, ADC_INSERTED_CHANNEL, 1);
-    // IA - PA0 - ADC01_IN0
-    adc_inserted_channel_config(ADC0, 0, ADC_CHANNEL_0, ADC_SAMPLETIME_7POINT5);
+    for (uint32_t timeout = 0U; timeout < 100000U; timeout++) {
+        if (SET == adc_flag_get(CTM_H759_VBUS_ADC, ADC_FLAG_EOC)) {
+            adc_buff[0] = (uint16_t) adc_regular_data_read(CTM_H759_VBUS_ADC);
+            adc_flag_clear(CTM_H759_VBUS_ADC, ADC_FLAG_EOC);
+            break;
+        }
+    }
 
-    /* ADC inserted trigger config */
-    adc_external_trigger_source_config(ADC0, ADC_INSERTED_CHANNEL, ADC0_1_EXTTRIG_INSERTED_T0_CH3);
-    adc_external_trigger_config(ADC0, ADC_INSERTED_CHANNEL, ENABLE);
-
-    /* ADC regular channel config */
-    adc_channel_length_config(ADC0, ADC_REGULAR_CHANNEL, 3);
-    // VBUS - PA3 - ADC01_IN3
-    adc_regular_channel_config(ADC0, 0, ADC_CHANNEL_3, ADC_SAMPLETIME_7POINT5);
-    // TEMP1 - PB0 - ADC01_IN8
-    adc_regular_channel_config(ADC0, 1, ADC_CHANNEL_8, ADC_SAMPLETIME_7POINT5);
-    // TEMP2 - PB1 - ADC01_IN9
-    adc_regular_channel_config(ADC0, 2, ADC_CHANNEL_9, ADC_SAMPLETIME_7POINT5);
-
-    /* ADC regular trigger config */
-    adc_external_trigger_source_config(ADC0, ADC_REGULAR_CHANNEL, ADC0_1_EXTTRIG_REGULAR_NONE);
-    adc_external_trigger_config(ADC0, ADC_REGULAR_CHANNEL, ENABLE);
-}
-
-static void ADC1_init(void)
-{
-    adc_deinit(ADC1);
-
-    adc_special_function_config(ADC1, ADC_SCAN_MODE, DISABLE);
-    adc_special_function_config(ADC1, ADC_CONTINUOUS_MODE, DISABLE);
-    adc_special_function_config(ADC1, ADC_INSERTED_CHANNEL_AUTO, DISABLE);
-    adc_resolution_config(ADC1, ADC_RESOLUTION_12B);
-    adc_data_alignment_config(ADC1, ADC_DATAALIGN_RIGHT);
-
-    /* ADC inserted channel config */
-    adc_channel_length_config(ADC1, ADC_INSERTED_CHANNEL, 1);
-    // IB - PA1 - ADC01_IN1
-    adc_inserted_channel_config(ADC1, 0, ADC_CHANNEL_1, ADC_SAMPLETIME_7POINT5);
-
-    /* ADC inserted trigger config */
-    adc_external_trigger_source_config(ADC1, ADC_INSERTED_CHANNEL, ADC0_1_EXTTRIG_INSERTED_NONE);
-    adc_external_trigger_config(ADC1, ADC_INSERTED_CHANNEL, ENABLE);
+    adc_software_trigger_enable(CTM_H759_VBUS_ADC, ADC_REGULAR_CHANNEL);
+#endif
 }
 
 static void TIMER0_init(void)
@@ -202,7 +275,7 @@ static void TIMER0_init(void)
     timer_oc_parameter_struct    timer_ocinitpara;
     timer_break_parameter_struct timer_breakpara;
 
-    timer_deinit(TIMER0);
+    timer_deinit(CTM_H759_PWM_TIMER);
     timer_struct_para_init(&timer_initpara);
     timer_initpara.prescaler         = 0;
     timer_initpara.alignedmode       = TIMER_COUNTER_CENTER_UP;
@@ -210,7 +283,7 @@ static void TIMER0_init(void)
     timer_initpara.period            = HALF_PWM_PERIOD_CYCLES;
     timer_initpara.clockdivision     = TIMER_CKDIV_DIV1;
     timer_initpara.repetitioncounter = 0;
-    timer_init(TIMER0, &timer_initpara);
+    timer_init(CTM_H759_PWM_TIMER, &timer_initpara);
 
     timer_channel_output_struct_para_init(&timer_ocinitpara);
     timer_ocinitpara.outputstate  = TIMER_CCX_ENABLE;
@@ -219,55 +292,60 @@ static void TIMER0_init(void)
     timer_ocinitpara.ocnpolarity  = TIMER_OCN_POLARITY_HIGH;
     timer_ocinitpara.ocidlestate  = TIMER_OC_IDLE_STATE_LOW;
     timer_ocinitpara.ocnidlestate = TIMER_OCN_IDLE_STATE_LOW;
-    timer_channel_output_config(TIMER0, TIMER_CH_0, &timer_ocinitpara);
-    timer_channel_output_config(TIMER0, TIMER_CH_1, &timer_ocinitpara);
-    timer_channel_output_config(TIMER0, TIMER_CH_2, &timer_ocinitpara);
-    timer_channel_output_config(TIMER0, TIMER_CH_3, &timer_ocinitpara);
+    timer_channel_output_config(CTM_H759_PWM_TIMER, TIMER_CH_0, &timer_ocinitpara);
+    timer_channel_output_config(CTM_H759_PWM_TIMER, TIMER_CH_1, &timer_ocinitpara);
+    timer_channel_output_config(CTM_H759_PWM_TIMER, TIMER_CH_2, &timer_ocinitpara);
+    timer_channel_output_config(CTM_H759_PWM_TIMER, TIMER_CH_3, &timer_ocinitpara);
 
-    timer_channel_output_pulse_value_config(TIMER0, TIMER_CH_0, 0);
-    timer_channel_output_mode_config(TIMER0, TIMER_CH_0, TIMER_OC_MODE_PWM0);
-    timer_channel_output_shadow_config(TIMER0, TIMER_CH_0, TIMER_OC_SHADOW_ENABLE);
+    timer_channel_output_pulse_value_config(CTM_H759_PWM_TIMER, TIMER_CH_0, 0);
+    timer_channel_output_mode_config(CTM_H759_PWM_TIMER, TIMER_CH_0, TIMER_OC_MODE_PWM0);
+    timer_channel_output_shadow_config(CTM_H759_PWM_TIMER, TIMER_CH_0, TIMER_OC_SHADOW_ENABLE);
+    timer_multi_mode_channel_mode_config(CTM_H759_PWM_TIMER, TIMER_CH_0, TIMER_MCH_MODE_COMPLEMENTARY);
 
-    timer_channel_output_pulse_value_config(TIMER0, TIMER_CH_1, 0);
-    timer_channel_output_mode_config(TIMER0, TIMER_CH_1, TIMER_OC_MODE_PWM0);
-    timer_channel_output_shadow_config(TIMER0, TIMER_CH_1, TIMER_OC_SHADOW_ENABLE);
+    timer_channel_output_pulse_value_config(CTM_H759_PWM_TIMER, TIMER_CH_1, 0);
+    timer_channel_output_mode_config(CTM_H759_PWM_TIMER, TIMER_CH_1, TIMER_OC_MODE_PWM0);
+    timer_channel_output_shadow_config(CTM_H759_PWM_TIMER, TIMER_CH_1, TIMER_OC_SHADOW_ENABLE);
+    timer_multi_mode_channel_mode_config(CTM_H759_PWM_TIMER, TIMER_CH_1, TIMER_MCH_MODE_COMPLEMENTARY);
 
-    timer_channel_output_pulse_value_config(TIMER0, TIMER_CH_2, 0);
-    timer_channel_output_mode_config(TIMER0, TIMER_CH_2, TIMER_OC_MODE_PWM0);
-    timer_channel_output_shadow_config(TIMER0, TIMER_CH_2, TIMER_OC_SHADOW_ENABLE);
+    timer_channel_output_pulse_value_config(CTM_H759_PWM_TIMER, TIMER_CH_2, 0);
+    timer_channel_output_mode_config(CTM_H759_PWM_TIMER, TIMER_CH_2, TIMER_OC_MODE_PWM0);
+    timer_channel_output_shadow_config(CTM_H759_PWM_TIMER, TIMER_CH_2, TIMER_OC_SHADOW_ENABLE);
+    timer_multi_mode_channel_mode_config(CTM_H759_PWM_TIMER, TIMER_CH_2, TIMER_MCH_MODE_COMPLEMENTARY);
 
-    timer_channel_output_pulse_value_config(TIMER0, TIMER_CH_3, (HALF_PWM_PERIOD_CYCLES - 5));
-    timer_channel_output_mode_config(TIMER0, TIMER_CH_3, TIMER_OC_MODE_PWM1);
-    timer_channel_output_shadow_config(TIMER0, TIMER_CH_3, TIMER_OC_SHADOW_DISABLE);
+    timer_channel_output_pulse_value_config(CTM_H759_PWM_TIMER, TIMER_CH_3, (HALF_PWM_PERIOD_CYCLES - 5U));
+    timer_channel_output_mode_config(CTM_H759_PWM_TIMER, TIMER_CH_3, TIMER_OC_MODE_PWM1);
+    timer_channel_output_shadow_config(CTM_H759_PWM_TIMER, TIMER_CH_3, TIMER_OC_SHADOW_DISABLE);
 
-    /* configure TIMER break function */
     timer_break_struct_para_init(&timer_breakpara);
-    /* automatic output enable, break, dead time and lock configuration*/
     timer_breakpara.runoffstate     = TIMER_ROS_STATE_DISABLE;
     timer_breakpara.ideloffstate    = TIMER_IOS_STATE_DISABLE;
-    timer_breakpara.deadtime        = 0; // use FD6288Q hardware deadtime 200ns
-    timer_breakpara.breakpolarity   = TIMER_BREAK_POLARITY_LOW;
+    timer_breakpara.deadtime        = 0U;
     timer_breakpara.outputautostate = TIMER_OUTAUTO_DISABLE;
     timer_breakpara.protectmode     = TIMER_CCHP_PROT_OFF;
-    timer_breakpara.breakstate      = TIMER_BREAK_DISABLE;
-    timer_break_config(TIMER0, &timer_breakpara);
+    timer_breakpara.break0state     = TIMER_BREAK0_DISABLE;
+    timer_breakpara.break0polarity  = TIMER_BREAK0_POLARITY_LOW;
+    timer_breakpara.break0lock      = TIMER_BREAK0_LK_DISABLE;
+    timer_breakpara.break0release   = TIMER_BREAK0_UNRELEASE;
+    timer_breakpara.break1state     = TIMER_BREAK1_DISABLE;
+    timer_breakpara.break1polarity  = TIMER_BREAK1_POLARITY_LOW;
+    timer_breakpara.break1lock      = TIMER_BREAK1_LK_DISABLE;
+    timer_breakpara.break1release   = TIMER_BREAK1_UNRELEASE;
+    timer_break_config(CTM_H759_PWM_TIMER, &timer_breakpara);
 }
 
 static void TIMER1_init(void)
 {
-    // TIMER1CLK = SystemCoreClock/2/60000 = 1KHz
     timer_parameter_struct timer_initpara;
 
     timer_deinit(TIMER1);
     timer_struct_para_init(&timer_initpara);
-    timer_initpara.prescaler        = 1;
+    timer_initpara.prescaler        = 300U - 1U;
     timer_initpara.alignedmode      = TIMER_COUNTER_EDGE;
     timer_initpara.counterdirection = TIMER_COUNTER_UP;
-    timer_initpara.period           = 60000 - 1;
+    timer_initpara.period           = 1000U - 1U;
     timer_initpara.clockdivision    = TIMER_CKDIV_DIV1;
     timer_init(TIMER1, &timer_initpara);
 
-    /* enable the TIMER interrupt */
     timer_interrupt_flag_clear(TIMER1, TIMER_INT_FLAG_UP);
     timer_interrupt_enable(TIMER1, TIMER_INT_UP);
 
@@ -276,153 +354,69 @@ static void TIMER1_init(void)
 
 static void LOCK_pins(void)
 {
-    // LED ACT PC13
-    gpio_pin_lock(GPIOB, GPIO_PIN_12);
+    gpio_pin_lock(CTM_H759_PHASE_A_PORT, CTM_H759_PHASE_A_PIN);
+    gpio_pin_lock(CTM_H759_PHASE_B_PORT, CTM_H759_PHASE_B_PIN);
 
-    // ADC
-    gpio_pin_lock(GPIOA, GPIO_PIN_0);
-    gpio_pin_lock(GPIOA, GPIO_PIN_1);
-    gpio_pin_lock(GPIOA, GPIO_PIN_3);
-    gpio_pin_lock(GPIOB, GPIO_PIN_0);
-    gpio_pin_lock(GPIOB, GPIO_PIN_1);
+#if CTM_H759_HAS_VBUS_ADC
+    gpio_pin_lock(CTM_H759_VBUS_PORT, CTM_H759_VBUS_PIN);
+#endif
 
-    // PWM
-    gpio_pin_lock(GPIOA, GPIO_PIN_8);
-    gpio_pin_lock(GPIOA, GPIO_PIN_9);
-    gpio_pin_lock(GPIOA, GPIO_PIN_10);
-    gpio_pin_lock(GPIOB, GPIO_PIN_13);
-    gpio_pin_lock(GPIOB, GPIO_PIN_14);
-    gpio_pin_lock(GPIOB, GPIO_PIN_15);
+    gpio_pin_lock(CTM_H759_PWM_CH0_PORT, CTM_H759_PWM_CH0_PIN);
+    gpio_pin_lock(CTM_H759_PWM_MCH0_PORT, CTM_H759_PWM_MCH0_PIN);
+    gpio_pin_lock(CTM_H759_PWM_CH1_PORT, CTM_H759_PWM_CH1_PIN);
+    gpio_pin_lock(CTM_H759_PWM_MCH1_PORT, CTM_H759_PWM_MCH1_PIN);
+    gpio_pin_lock(CTM_H759_PWM_CH2_PORT, CTM_H759_PWM_CH2_PIN);
+    gpio_pin_lock(CTM_H759_PWM_MCH2_PORT, CTM_H759_PWM_MCH2_PIN);
 
-    // CAN0
-    gpio_pin_lock(GPIOB, GPIO_PIN_8);
-    gpio_pin_lock(GPIOB, GPIO_PIN_9);
+#if (CTM_H759_ENCODER_INTERFACE == CTM_H759_ENCODER_IF_SPI)
+    gpio_pin_lock(CTM_H759_SPI0_SCK_PORT, CTM_H759_SPI0_SCK_PIN);
+    gpio_pin_lock(CTM_H759_SPI0_MISO_PORT, CTM_H759_SPI0_MISO_PIN);
+    gpio_pin_lock(CTM_H759_SPI0_MOSI_PORT, CTM_H759_SPI0_MOSI_PIN);
+    gpio_pin_lock(CTM_H759_ENC_CS_PORT, CTM_H759_ENC_CS_PIN);
+#else
+    gpio_pin_lock(CTM_H759_ENC_PWM_PORT, CTM_H759_ENC_PWM_PIN);
+#endif
 
-    // SPI2
-    gpio_pin_lock(GPIOB, GPIO_PIN_3);
-    gpio_pin_lock(GPIOB, GPIO_PIN_4);
-    gpio_pin_lock(GPIOB, GPIO_PIN_5);
-    gpio_pin_lock(GPIOB, GPIO_PIN_6);
+    gpio_pin_lock(CTM_H759_CAN_RX_PORT, CTM_H759_CAN_RX_PIN);
+    gpio_pin_lock(CTM_H759_CAN_TX_PORT, CTM_H759_CAN_TX_PIN);
 }
 
 static void NVIC_init(void)
 {
     nvic_priority_group_set(NVIC_PRIGROUP_PRE4_SUB0);
 
-    // ADC01 insert convert complete interrupt NVIC
-    NVIC_SetPriority(ADC0_1_IRQn, 0);
-    NVIC_EnableIRQ(ADC0_1_IRQn);
-
-    // TIM1 interrupt NVIC
-    NVIC_SetPriority(TIMER1_IRQn, 1);
-    NVIC_EnableIRQ(TIMER1_IRQn);
-
-    // CAN0 Rx interrupt NVIC
-    NVIC_SetPriority(CAN0_RX0_IRQn, 2);
-    NVIC_EnableIRQ(CAN0_RX0_IRQn);
+    nvic_irq_enable(CTM_H759_PHASE_ADC_IRQ, 0U, 0U);
+    nvic_irq_enable(TIMER1_IRQn, 1U, 0U);
+    nvic_irq_enable(CTM_H759_CAN_IRQ, 2U, 0U);
+#if (CTM_H759_ENCODER_INTERFACE == CTM_H759_ENCODER_IF_PWM)
+    nvic_irq_enable(CTM_H759_ENC_PWM_TIMER_IRQ, 3U, 0U);
+#endif
 }
 
 static void WATCH_DOG_init(void)
 {
-    /* enable IRC40K */
-    rcu_osci_on(RCU_IRC40K);
+    rcu_osci_on(RCU_IRC32K);
 
-    /* wait till IRC40K is ready */
-    while (SUCCESS != rcu_osci_stab_wait(RCU_IRC40K)) {
+    while (SUCCESS != rcu_osci_stab_wait(RCU_IRC32K)) {
     }
 
-    /* confiure FWDGT counter clock: 40KHz(IRC40K) / 32 = 5000 Hz */
-    fwdgt_config(50, FWDGT_PSC_DIV8); // 10 ms
-}
-
-static void CAN0_init(int baudrate)
-{
-    can_parameter_struct can_parameter;
-
-    can_interrupt_disable(CAN0, CAN_INTEN_RFNEIE0);
-    can_deinit(CAN0);
-
-    // Reset CAN peripheral
-    CAN_CTL(CAN0) |= CAN_CTL_SWRST;
-    while ((CAN_CTL(CAN0) & CAN_CTL_SWRST) != 0)
-        ; // reset bit is set to zero after reset
-    while ((CAN_STAT(CAN0) & CAN_STAT_SLPWS) == 0)
-        ; // should be in sleep mode after reset
-
-    can_struct_para_init(CAN_INIT_STRUCT, &can_parameter);
-    can_parameter.working_mode          = CAN_NORMAL_MODE;
-    can_parameter.auto_retrans          = ENABLE;
-    can_parameter.auto_bus_off_recovery = ENABLE;
-    can_parameter.auto_wake_up          = DISABLE;
-    can_parameter.rec_fifo_overwrite    = DISABLE;
-    can_parameter.trans_fifo_order      = ENABLE;
-    can_parameter.time_triggered        = DISABLE;
-
-    int brp, seg1, seg2, sjw;
-
-    switch ((tCanBaudrate) baudrate) {
-    case CAN_BAUDRATE_250K:
-        brp  = 24;
-        seg1 = 5;
-        seg2 = 4;
-        sjw  = 4;
-        break;
-
-    case CAN_BAUDRATE_500K:
-        brp  = 8;
-        seg1 = 8;
-        seg2 = 6;
-        sjw  = 4;
-        break;
-
-    case CAN_BAUDRATE_800K:
-        brp  = 5;
-        seg1 = 9;
-        seg2 = 5;
-        sjw  = 4;
-        break;
-
-    case CAN_BAUDRATE_1000K:
-        brp  = 4;
-        seg1 = 10;
-        seg2 = 4;
-        sjw  = 4;
-        break;
-
-    default:
-        // 500K
-        brp  = 8;
-        seg1 = 8;
-        seg2 = 6;
-        sjw  = 4;
-        break;
-    }
-
-    can_parameter.prescaler         = brp;
-    can_parameter.resync_jump_width = sjw - 1;
-    can_parameter.time_segment_1    = seg1 - 1;
-    can_parameter.time_segment_2    = seg2 - 1;
-    can_init(CAN0, &can_parameter);
-
-    /* initialize filter */
-    can1_filter_start_bank(14);
-    can_filter_mask_mode_init(0, 0, CAN_EXTENDED_FIFO0, 0);
-    can_filter_mask_mode_init(0, 0, CAN_STANDARD_FIFO0, 0);
-
-    /* enable can receive FIFO0 not empty interrupt */
-    can_interrupt_enable(CAN0, CAN_INTEN_RFNEIE0);
+    /* Keep enough margin for H7 flash sector erase/program during DFU boot copy. */
+    fwdgt_config(156U, FWDGT_PSC_DIV256);
 }
 
 int main(void)
 {
     __disable_irq();
 
+    rtt_mpu_enable();
+    RTT_init();
+    cache_enable();
     RCU_init();
     GPIO_init();
-    SPI2_init();
-    DMA0_init();
-    ADC0_init();
-    ADC1_init();
+    SPI0_init();
+    ENCODER_hw_init();
+    ADC_PHASE_init();
+    ADC_VBUS_init();
     TIMER0_init();
     TIMER1_init();
     LOCK_pins();
@@ -440,7 +434,7 @@ int main(void)
     }
 
     CAN_set_node_id(UsrConfig.node_id);
-    CAN0_init(UsrConfig.can_baudrate);
+    CAN_hw_init(UsrConfig.can_baudrate);
 
     MCT_init();
     FOC_init();
@@ -451,7 +445,7 @@ int main(void)
     fwdgt_enable();
     __enable_irq();
 
-    // wait voltage stable
+    /* wait voltage stable */
     for (uint8_t i = 0, j = 0; i < 250; i++) {
         if (Foc.v_bus_filt > 20) {
             if (++j > 20) {
@@ -482,8 +476,7 @@ void Error_Handler(void)
 {
     __disable_irq();
 
-    /* Main PWM Output Disable */
-    timer_primary_output_config(TIMER0, DISABLE);
+    timer_primary_output_config(CTM_H759_PWM_TIMER, DISABLE);
 
     while (1) {
     }
@@ -491,8 +484,8 @@ void Error_Handler(void)
 
 void delay_ms(const uint16_t ms)
 {
-    volatile uint32_t i = ms * 17200;
-    while (i-- > 0) {
+    volatile uint32_t i = (SystemCoreClock / 7000U) * (uint32_t) ms;
+    while (i-- > 0U) {
         __NOP();
     }
 }

@@ -1,12 +1,12 @@
 /*
     Copyright 2021 codenocold codenocold@qq.com
-    Address : https://github.com/codenocold/dgm
-    This file is part of the dgm firmware.
-    The dgm firmware is free software: you can redistribute it and/or modify
+    Address : https://github.com/codenocold/ctm
+    This file is part of the ctm firmware.
+    The ctm firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
-    The dgm firmware is distributed in the hope that it will be useful,
+    The ctm firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -24,15 +24,33 @@
 #include "util.h"
 #include <string.h>
 
+#define CAN_DIAG_ENABLE 1
+
+#if CAN_DIAG_ENABLE
+#include "SEGGER_RTT.h"
+#define CAN_LOG(format, ...) SEGGER_RTT_printf(0, format, ##__VA_ARGS__)
+#else
+#define CAN_LOG(format, ...)
+#endif
+
 static uint8_t  mNodeID;
 static uint32_t mRxTick       = 0;
 static uint32_t mTxTick       = 0;
 static uint32_t mCanBusErrNew = 0;
 static uint32_t mCanBusErrOld = 0;
+static FlagStatus mCanTxPrimed = RESET;
+
+static can_mailbox_descriptor_struct mCanRxMessage;
+static uint32_t mCanRxData[2];
 
 static void can_error_check(void);
+static void can_baudrate_config(int baudrate, can_parameter_struct *can_parameter);
+static void can_rx_mailbox_arm(void);
 static bool can_tx(CanFrame *tx_frame);
 static bool can_rx(CanFrame *rx_frame);
+static const char *can_cmd_name(uint8_t cmd);
+static bool can_cmd_is_critical(uint8_t cmd);
+static void can_log_frame(const char *tag, const CanFrame *frame);
 
 static void fill_value(uint8_t idx, uint8_t *data);
 static void parse_frame(CanFrame *frame);
@@ -41,6 +59,39 @@ static void config_callback(uint8_t *data, bool isSet);
 void CAN_set_node_id(uint8_t nodeID)
 {
     mNodeID = nodeID;
+}
+
+void CAN_hw_init(int baudrate)
+{
+    can_parameter_struct can_parameter;
+
+    can_interrupt_disable(CTM_H759_CAN, CAN_INT_MB0);
+    can_deinit(CTM_H759_CAN);
+
+    can_struct_para_init(CAN_INIT_STRUCT, &can_parameter);
+    can_parameter.internal_counter_source          = CAN_TIMER_SOURCE_BIT_CLOCK;
+    can_parameter.self_reception                   = DISABLE;
+    can_parameter.mb_tx_order                      = CAN_TX_HIGH_PRIORITY_MB_FIRST;
+    can_parameter.mb_tx_abort_enable               = ENABLE;
+    can_parameter.local_priority_enable            = DISABLE;
+    can_parameter.mb_rx_ide_rtr_type               = CAN_IDE_RTR_FILTERED;
+    can_parameter.mb_remote_frame                  = CAN_STORE_REMOTE_REQUEST_FRAME;
+    can_parameter.rx_private_filter_queue_enable   = DISABLE;
+    can_parameter.edge_filter_enable               = DISABLE;
+    can_parameter.protocol_exception_enable        = DISABLE;
+    can_parameter.rx_filter_order                  = CAN_RX_FILTER_ORDER_MAILBOX_FIRST;
+    can_parameter.memory_size                      = CAN_MEMSIZE_32_UNIT;
+    /* Accept all CAN IDs; protocol filtering is handled in parse_frame(). */
+    can_parameter.mb_public_filter                 = 0x00000000U;
+    can_baudrate_config(baudrate, &can_parameter);
+
+    can_init(CTM_H759_CAN, &can_parameter);
+    can_operation_mode_enter(CTM_H759_CAN, CAN_NORMAL_MODE);
+
+    can_rx_mailbox_arm();
+    can_interrupt_enable(CTM_H759_CAN, CAN_INT_MB0);
+    mCanTxPrimed = RESET;
+    CAN_LOG("[CAN] init baud=%d node=%u\n", baudrate, (unsigned)mNodeID);
 }
 
 void CAN_comm_loop(void)
@@ -92,7 +143,9 @@ void CAN_tx_statusword(tMCStatusword statusword)
     tx_frame.data[0] = statusword.status.status_code;
     tx_frame.data[1] = statusword.errors.errors_code;
     tx_frame.dlc     = 2;
-    can_tx(&tx_frame);
+    if (!can_tx(&tx_frame)) {
+        CAN_LOG("[CAN] drop statusword reply\n");
+    }
 }
 
 void CAN_calib_report(int32_t step, uint8_t *data)
@@ -103,7 +156,9 @@ void CAN_calib_report(int32_t step, uint8_t *data)
     tx_frame.dlc += int32_to_data(step, &tx_frame.data[tx_frame.dlc]);
     memcpy(&tx_frame.data[tx_frame.dlc], data, 4);
     tx_frame.dlc += 4;
-    can_tx(&tx_frame);
+    if (!can_tx(&tx_frame)) {
+        CAN_LOG("[CAN] drop calib report step=%d\n", (int) step);
+    }
 }
 
 void CAN_anticogging_report(int32_t step, int32_t value)
@@ -113,142 +168,260 @@ void CAN_anticogging_report(int32_t step, int32_t value)
     tx_frame.dlc = 0;
     tx_frame.dlc += int32_to_data(step, &tx_frame.data[tx_frame.dlc]);
     tx_frame.dlc += int32_to_data(value, &tx_frame.data[tx_frame.dlc]);
-    can_tx(&tx_frame);
+    if (!can_tx(&tx_frame)) {
+        CAN_LOG("[CAN] drop anticogging report step=%d\n", (int) step);
+    }
 }
 
 static void can_error_check(void)
 {
-    mCanBusErrNew = CAN_ERR(CAN0);
+    mCanBusErrNew = (uint32_t) can_error_state_get(CTM_H759_CAN);
+    if (SET == can_flag_get(CTM_H759_CAN, CAN_FLAG_RX_WARNING)) {
+        mCanBusErrNew |= (1UL << 8);
+    }
+    if (SET == can_flag_get(CTM_H759_CAN, CAN_FLAG_TX_WARNING)) {
+        mCanBusErrNew |= (1UL << 9);
+    }
+    if (SET == can_flag_get(CTM_H759_CAN, CAN_FLAG_BUSOFF)) {
+        mCanBusErrNew |= (1UL << 10);
+    }
+
     if (mCanBusErrOld != mCanBusErrNew) {
         mCanBusErrOld = mCanBusErrNew;
+        CAN_LOG("[CAN] err state=%u rx_warn=%u tx_warn=%u busoff=%u\n",
+                (unsigned) (mCanBusErrNew & 0x03U),
+                (unsigned) !!(mCanBusErrNew & (1UL << 8)),
+                (unsigned) !!(mCanBusErrNew & (1UL << 9)),
+                (unsigned) !!(mCanBusErrNew & (1UL << 10)));
 
-        // warning error
-        if (mCanBusErrNew & CAN_ERR_WERR) {
+        if ((CAN_ERROR_STATE_PASSIVE == (can_error_state_enum) (mCanBusErrNew & 0x03U))
+            || (CAN_ERROR_STATE_BUS_OFF == (can_error_state_enum) (mCanBusErrNew & 0x03U))) {
+            can_mailbox_transmit_abort(CTM_H759_CAN, CTM_H759_CAN_TX_MAILBOX);
+            mCanTxPrimed = RESET;
+            can_rx_mailbox_arm();
         }
-
-        // passive error
-        if (mCanBusErrNew & CAN_ERR_PERR) {
-            // Reset Tx fifo
-            can_transmission_stop(CAN0, CAN_MAILBOX0);
-            can_transmission_stop(CAN0, CAN_MAILBOX1);
-            can_transmission_stop(CAN0, CAN_MAILBOX2);
-
-            // Reset Rx fifo
-            CAN_RFIFO0(CAN0) |= CAN_RFIFO0_RFD0;
-        }
-
-        // bus-off error
-        if (mCanBusErrNew & CAN_ERR_BOERR) {
-            // Reset Tx fifo
-            can_transmission_stop(CAN0, CAN_MAILBOX0);
-            can_transmission_stop(CAN0, CAN_MAILBOX1);
-            can_transmission_stop(CAN0, CAN_MAILBOX2);
-
-            // Reset Rx fifo
-            CAN_RFIFO0(CAN0) |= CAN_RFIFO0_RFD0;
-        }
-
-        // CAN error type
-        switch (can_error_get(CAN0)) {
-        case CAN_ERROR_FILL:
-            // fill error
-
-            break;
-
-        case CAN_ERROR_FORMATE:
-            // format error
-
-            break;
-
-        case CAN_ERROR_ACK:
-            // ack error
-
-            break;
-
-        case CAN_ERROR_BITRECESSIVE:
-            // bit recessive error
-
-            break;
-
-        case CAN_ERROR_BITDOMINANTER:
-            // bit dominant error
-
-            break;
-
-        case CAN_ERROR_CRC:
-            // crc error
-
-            break;
-
-        default:
-            break;
-        }
-        CAN_ERR(CAN0) = CAN_ERR_ERRN;
     }
+}
+
+static void can_baudrate_config(int baudrate, can_parameter_struct *can_parameter)
+{
+    can_parameter->resync_jump_width = 1U;
+    can_parameter->prop_time_segment = 2U;
+    can_parameter->time_segment_1    = 9U;
+    can_parameter->time_segment_2    = 3U;
+
+    switch ((tCanBaudrate) baudrate) {
+    case CAN_BAUDRATE_250K:
+        can_parameter->prescaler = 80U;
+        break;
+
+    case CAN_BAUDRATE_500K:
+        can_parameter->prescaler = 40U;
+        break;
+
+    case CAN_BAUDRATE_800K:
+        can_parameter->prescaler = 25U;
+        break;
+
+    case CAN_BAUDRATE_1000K:
+        can_parameter->prescaler = 20U;
+        break;
+
+    default:
+        can_parameter->prescaler = 40U;
+        break;
+    }
+}
+
+static void can_rx_mailbox_arm(void)
+{
+    memset(mCanRxData, 0, sizeof(mCanRxData));
+    can_struct_para_init(CAN_MDSC_STRUCT, &mCanRxMessage);
+    mCanRxMessage.rtr        = 0U;
+    mCanRxMessage.ide        = 0U;
+    mCanRxMessage.code       = CAN_MB_RX_STATUS_EMPTY;
+    mCanRxMessage.id         = 0U;
+    mCanRxMessage.data       = mCanRxData;
+    mCanRxMessage.data_bytes = 8U;
+    can_mailbox_config(CTM_H759_CAN, CTM_H759_CAN_RX_MAILBOX, &mCanRxMessage);
 }
 
 static bool can_tx(CanFrame *tx_frame)
 {
-    uint8_t mailbox_number;
+    can_mailbox_descriptor_struct tx_message;
+    uint32_t                    tx_data[2];
+    uint8_t dlc = tx_frame->dlc > 8U ? 8U : tx_frame->dlc;
+    bool busy = false;
+    bool sent = false;
+    uint32_t primask;
 
-    /* select one empty mailbox */
-    if (CAN_TSTAT_TME0 == (CAN_TSTAT(CAN0) & CAN_TSTAT_TME0)) {
-        mailbox_number = CAN_MAILBOX0;
-    } else if (CAN_TSTAT_TME1 == (CAN_TSTAT(CAN0) & CAN_TSTAT_TME1)) {
-        mailbox_number = CAN_MAILBOX1;
-    } else if (CAN_TSTAT_TME2 == (CAN_TSTAT(CAN0) & CAN_TSTAT_TME2)) {
-        mailbox_number = CAN_MAILBOX2;
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if ((SET == mCanTxPrimed) && (RESET == can_flag_get(CTM_H759_CAN, CAN_FLAG_MB1))) {
+        busy = true;
     } else {
-        mailbox_number = CAN_NOMAILBOX;
+        if (SET == mCanTxPrimed) {
+            can_flag_clear(CTM_H759_CAN, CAN_FLAG_MB1);
+        }
+
+        memset(tx_data, 0, sizeof(tx_data));
+        memcpy((uint8_t *) tx_data, tx_frame->data, dlc);
+
+        can_struct_para_init(CAN_MDSC_STRUCT, &tx_message);
+        tx_message.rtr        = 0U;
+        tx_message.ide        = 0U;
+        tx_message.code       = CAN_MB_TX_STATUS_DATA;
+        tx_message.brs        = 0U;
+        tx_message.fdf        = 0U;
+        tx_message.prio       = 0U;
+        tx_message.data_bytes = dlc;
+        tx_message.data       = tx_data;
+        tx_message.id         = tx_frame->id & 0x7FFU;
+        can_mailbox_config(CTM_H759_CAN, CTM_H759_CAN_TX_MAILBOX, &tx_message);
+
+        mCanTxPrimed = SET;
+        CAN_reset_tx_timeout();
+        sent = true;
     }
-    /* return no mailbox empty */
-    if (CAN_NOMAILBOX == mailbox_number) {
-        return false;
+    __set_PRIMASK(primask);
+
+    if (busy && can_cmd_is_critical(GET_CMD(tx_frame->id))) {
+        CAN_LOG("[CAN] tx busy id=0x%03X cmd=%u(%s) dlc=%u\n",
+                (unsigned) (tx_frame->id & 0x7FFU),
+                (unsigned) GET_CMD(tx_frame->id),
+                can_cmd_name(GET_CMD(tx_frame->id)),
+                (unsigned) dlc);
     }
 
-    /* set transmit mailbox standard identifier */
-    CAN_TMI(CAN0, mailbox_number) = (uint32_t) (TMI_SFID(tx_frame->id & 0x7FF));
-
-    /* set the data length */
-    CAN_TMP(CAN0, mailbox_number) &= ~(CAN_TMP_DLENC | CAN_TMP_ESI | CAN_TMP_BRS | CAN_TMP_FDF);
-    CAN_TMP(CAN0, mailbox_number) |= tx_frame->dlc & 0x0F;
-
-    /* set the data */
-    CAN_TMDATA0(CAN0, mailbox_number) = TMDATA0_DB3(tx_frame->data[3]) | TMDATA0_DB2(tx_frame->data[2])
-                                        | TMDATA0_DB1(tx_frame->data[1]) | TMDATA0_DB0(tx_frame->data[0]);
-    CAN_TMDATA1(CAN0, mailbox_number) = TMDATA1_DB7(tx_frame->data[7]) | TMDATA1_DB6(tx_frame->data[6])
-                                        | TMDATA1_DB5(tx_frame->data[5]) | TMDATA1_DB4(tx_frame->data[4]);
-
-    /* enable transmission */
-    CAN_TMI(CAN0, mailbox_number) |= CAN_TMI_TEN;
-
-    CAN_reset_tx_timeout();
-
-    return true;
+    return sent;
 }
 
 static bool can_rx(CanFrame *rx_frame)
 {
-    if ((CAN_RFIFO0(CAN0) & CAN_RFIF_RFL_MASK) != 0) {
-        rx_frame->id = GET_RFIFOMI_SFID(CAN_RFIFOMI(CAN0, 0));
+    uint8_t dlc;
 
-        rx_frame->dlc = (uint8_t) (GET_RFIFOMP_DLENC(CAN_RFIFOMP(CAN0, 0)));
-
-        rx_frame->data[0] = (uint8_t) (GET_RFIFOMDATA0_DB0(CAN_RFIFOMDATA0(CAN0, 0)));
-        rx_frame->data[1] = (uint8_t) (GET_RFIFOMDATA0_DB1(CAN_RFIFOMDATA0(CAN0, 0)));
-        rx_frame->data[2] = (uint8_t) (GET_RFIFOMDATA0_DB2(CAN_RFIFOMDATA0(CAN0, 0)));
-        rx_frame->data[3] = (uint8_t) (GET_RFIFOMDATA0_DB3(CAN_RFIFOMDATA0(CAN0, 0)));
-        rx_frame->data[4] = (uint8_t) (GET_RFIFOMDATA1_DB4(CAN_RFIFOMDATA1(CAN0, 0)));
-        rx_frame->data[5] = (uint8_t) (GET_RFIFOMDATA1_DB5(CAN_RFIFOMDATA1(CAN0, 0)));
-        rx_frame->data[6] = (uint8_t) (GET_RFIFOMDATA1_DB6(CAN_RFIFOMDATA1(CAN0, 0)));
-        rx_frame->data[7] = (uint8_t) (GET_RFIFOMDATA1_DB7(CAN_RFIFOMDATA1(CAN0, 0)));
-
-        CAN_RFIFO0(CAN0) |= CAN_RFIFO0_RFD0; // release FIFO
-
-        return true;
-    } else {
+    if (RESET == can_interrupt_flag_get(CTM_H759_CAN, CAN_INT_FLAG_MB0)) {
         return false;
     }
+
+    if (SUCCESS != can_mailbox_receive_data_read(CTM_H759_CAN, CTM_H759_CAN_RX_MAILBOX, &mCanRxMessage)) {
+        can_interrupt_flag_clear(CTM_H759_CAN, CAN_INT_FLAG_MB0);
+        can_rx_mailbox_arm();
+        CAN_LOG("[CAN] rx read failed\n");
+        return false;
+    }
+
+    dlc = mCanRxMessage.data_bytes > 8U ? 8U : (uint8_t) mCanRxMessage.data_bytes;
+    rx_frame->id  = mCanRxMessage.id & 0x7FFU;
+    rx_frame->dlc = dlc;
+    memcpy(rx_frame->data, (uint8_t *) mCanRxData, dlc);
+
+    can_rx_mailbox_arm();
+
+    return true;
+}
+
+static const char *can_cmd_name(uint8_t cmd)
+{
+    switch (cmd) {
+    case CAN_CMD_SET_OP_MODE:
+        return "SET_OP_MODE";
+    case CAN_CMD_MOTOR_ENABLE:
+        return "MOTOR_ENABLE";
+    case CAN_CMD_MOTOR_DISABLE:
+        return "MOTOR_DISABLE";
+    case CAN_CMD_SET_TORQUE:
+        return "SET_TORQUE";
+    case CAN_CMD_SET_VELOCITY:
+        return "SET_VELOCITY";
+    case CAN_CMD_SET_POSITION:
+        return "SET_POSITION";
+    case CAN_CMD_SYNC:
+        return "SYNC";
+    case CAN_CMD_CALIB_START:
+        return "CALIB_START";
+    case CAN_CMD_CALIB_REPORT:
+        return "CALIB_REPORT";
+    case CAN_CMD_CALIB_ABORT:
+        return "CALIB_ABORT";
+    case CAN_CMD_ANTICOGGING_START:
+        return "ANTICOGGING_START";
+    case CAN_CMD_ANTICOGGING_REPORT:
+        return "ANTICOGGING_REPORT";
+    case CAN_CMD_ANTICOGGING_ABORT:
+        return "ANTICOGGING_ABORT";
+    case CAN_CMD_SET_HOME:
+        return "SET_HOME";
+    case CAN_CMD_ERROR_RESET:
+        return "ERROR_RESET";
+    case CAN_CMD_GET_STATUSWORD:
+        return "GET_STATUSWORD";
+    case CAN_CMD_STATUSWORD_REPORT:
+        return "STATUSWORD_REPORT";
+    case CAN_CMD_GET_VALUE_1:
+        return "GET_VALUE_1";
+    case CAN_CMD_GET_VALUE_2:
+        return "GET_VALUE_2";
+    case CAN_CMD_HEARTBEAT:
+        return "HEARTBEAT";
+    case CAN_CMD_SET_CONFIG:
+        return "SET_CONFIG";
+    case CAN_CMD_GET_CONFIG:
+        return "GET_CONFIG";
+    case CAN_CMD_SAVE_ALL_CONFIG:
+        return "SAVE_ALL_CONFIG";
+    case CAN_CMD_RESET_ALL_CONFIG:
+        return "RESET_ALL_CONFIG";
+    case CAN_CMD_GET_FW_VERSION:
+        return "GET_FW_VERSION";
+    case CAN_CMD_DFU_START:
+        return "DFU_START";
+    case CAN_CMD_DFU_DATA:
+        return "DFU_DATA";
+    case CAN_CMD_DFU_END:
+        return "DFU_END";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static bool can_cmd_is_critical(uint8_t cmd)
+{
+    switch (cmd) {
+    case CAN_CMD_SET_OP_MODE:
+    case CAN_CMD_MOTOR_ENABLE:
+    case CAN_CMD_MOTOR_DISABLE:
+    case CAN_CMD_CALIB_START:
+    case CAN_CMD_CALIB_ABORT:
+    case CAN_CMD_ANTICOGGING_START:
+    case CAN_CMD_ANTICOGGING_ABORT:
+    case CAN_CMD_SET_HOME:
+    case CAN_CMD_ERROR_RESET:
+    case CAN_CMD_GET_STATUSWORD:
+    case CAN_CMD_GET_FW_VERSION:
+    case CAN_CMD_SET_CONFIG:
+    case CAN_CMD_GET_CONFIG:
+    case CAN_CMD_SAVE_ALL_CONFIG:
+    case CAN_CMD_RESET_ALL_CONFIG:
+    case CAN_CMD_DFU_START:
+    case CAN_CMD_DFU_END:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void can_log_frame(const char *tag, const CanFrame *frame)
+{
+    uint8_t cmd = GET_CMD(frame->id);
+    CAN_LOG("[CAN] %s id=0x%03X node=%u cmd=%u(%s) dlc=%u echo=%u\n",
+            tag,
+            (unsigned) (frame->id & 0x7FFU),
+            (unsigned) GET_NODE_ID(frame->id),
+            (unsigned) cmd,
+            can_cmd_name(cmd),
+            (unsigned) frame->dlc,
+            (unsigned) !!IS_ECHO(frame->id));
 }
 
 static void fill_value(uint8_t idx, uint8_t *data)
@@ -324,6 +497,10 @@ static void parse_frame(CanFrame *frame)
     }
 
     CAN_reset_rx_timeout();
+
+    if (can_cmd_is_critical(cmd)) {
+        can_log_frame("rx", frame);
+    }
 
     switch (cmd) {
     case CAN_CMD_SET_OP_MODE:
@@ -521,7 +698,9 @@ static void parse_frame(CanFrame *frame)
         echo           = true;
         if (ret == 0) {
             watch_dog_feed();
-            can_tx(frame);
+            if (!can_tx(frame)) {
+                CAN_LOG("[CAN] drop DFU_END ack\n");
+            }
             delay_ms(100);
             watch_dog_feed();
             DFU_jump_bootloader();
@@ -533,7 +712,13 @@ static void parse_frame(CanFrame *frame)
     }
 
     if (echo) {
-        can_tx(frame);
+        if (!can_tx(frame)) {
+            if (can_cmd_is_critical(cmd)) {
+                CAN_LOG("[CAN] drop ack cmd=%u(%s)\n", (unsigned) cmd, can_cmd_name(cmd));
+            }
+        } else if (can_cmd_is_critical(cmd)) {
+            can_log_frame("tx", frame);
+        }
     }
 }
 
