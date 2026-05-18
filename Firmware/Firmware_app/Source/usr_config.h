@@ -17,10 +17,10 @@
 #ifndef __USR_CONFIG_H__
 #define __USR_CONFIG_H__
 
-#include "main.h"
+#include "ctm_types.h"
 
-#define FW_VERSION_MAJOR 3
-#define FW_VERSION_MINOR 5
+#define FW_VERSION_MAJOR 1
+#define FW_VERSION_MINOR 0
 
 #define OFFSET_LUT_NUM   128U
 #define COGGING_MAP_NUM  5000U

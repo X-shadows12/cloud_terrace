@@ -17,7 +17,7 @@
 #ifndef __ENCODER_H__
 #define __ENCODER_H__
 
-#include "main.h"
+#include "ctm_types.h"
 
 #define ENCODER_CPR     (int) 32768
 #define ENCODER_CPR_F   (32768.0f)
@@ -55,12 +55,7 @@ typedef struct sEncoder
 extern tEncoder Encoder;
 
 void ENCODER_init(void);
-void ENCODER_hw_init(void);
 bool ENCODER_sample(void);
-#if (CTM_H759_ENCODER_INTERFACE == CTM_H759_ENCODER_IF_PWM)
-void ENCODER_pwm_capture_callback(uint16_t capture);
-void ENCODER_pwm_capture_overrun_callback(void);
-#endif
 void ENCODER_loop(void);
 
 #endif

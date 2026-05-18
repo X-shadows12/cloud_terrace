@@ -117,13 +117,13 @@ static const unsigned int crc32_table[256]
        0x84fbdbd0, 0x9abc8bd5, 0x9e7d9662, 0x933eb0bb, 0x97ffad0c, 0xafb010b1, 0xab710d06, 0xa6322bdf, 0xa2f33668,
        0xbcb4666d, 0xb8757bda, 0xb5365d03, 0xb1f740b4};
 
-inline void clarke_transform(float Ia, float Ib, float Ic, float *Ialpha, float *Ibeta)
+void clarke_transform(float Ia, float Ib, float Ic, float *Ialpha, float *Ibeta)
 {
     *Ialpha = Ia;
     *Ibeta  = (Ib - Ic) * ONE_BY_SQRT3;
 }
 
-inline void park_transform(float Ialpha, float Ibeta, float Theta, float *Id, float *Iq)
+void park_transform(float Ialpha, float Ibeta, float Theta, float *Id, float *Iq)
 {
     float s = sin_f32(Theta);
     float c = cos_f32(Theta);
@@ -131,7 +131,7 @@ inline void park_transform(float Ialpha, float Ibeta, float Theta, float *Id, fl
     *Iq     = -Ialpha * s + Ibeta * c;
 }
 
-inline void inverse_park(float mod_d, float mod_q, float Theta, float *mod_alpha, float *mod_beta)
+void inverse_park(float mod_d, float mod_q, float Theta, float *mod_alpha, float *mod_beta)
 {
     float s    = sin_f32(Theta);
     float c    = cos_f32(Theta);
@@ -145,7 +145,7 @@ inline void inverse_park(float mod_d, float mod_q, float Theta, float *mod_alpha
 /// @param duty_a Output [0~1]
 /// @param duty_b Output [0~1]
 /// @param duty_c Output [0~1]
-inline int svm(float alpha, float beta, float *duty_a, float *duty_b, float *duty_c)
+int svm(float alpha, float beta, float *duty_a, float *duty_b, float *duty_c)
 {
     int Sextant;
 

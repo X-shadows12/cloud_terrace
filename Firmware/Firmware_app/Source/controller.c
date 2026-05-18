@@ -19,7 +19,7 @@
 #include "encoder.h"
 #include "foc.h"
 #include "mc_task.h"
-#include "pwm_curr.h"
+#include "motor_hw.h"
 #include "trapTraj.h"
 #include "usr_config.h"
 #include "util.h"
@@ -28,12 +28,16 @@ tController Controller;
 
 int CONTROLLER_set_op_mode(tControlMode mode)
 {
-    __disable_irq();
+    if (mode > CONTROL_MODE_POSITION_PROFILE) {
+        return -1;
+    }
+
+    MOTOR_HW_enter_critical();
 
     Controller.ctrl_mode = mode;
     CONTROLLER_reset();
 
-    __enable_irq();
+    MOTOR_HW_exit_critical();
 
     return 0;
 }
@@ -46,13 +50,13 @@ int CONTROLLER_set_home(void)
         Encoder.shadow_count = 0;
     } else if (MCT_get_state() == RUN) {
         if (ABS(Encoder.vel) < 0.5f && Traj.profile_done) {
-            __disable_irq();
+            MOTOR_HW_enter_critical();
             Controller.input_position        = 0;
             Controller.input_position_buffer = 0;
             Controller.pos_setpoint          = 0;
             Encoder.shadow_count             = 0;
             Encoder.pos                      = 0;
-            __enable_irq();
+            MOTOR_HW_exit_critical();
         } else {
             ret = -1;
         }
@@ -96,6 +100,11 @@ void CONTROLLER_sync_callback(void)
 
 void CONTROLLER_init(void)
 {
+    if ((UsrConfig.default_op_mode < CONTROL_MODE_CURRENT_RAMP)
+        || (UsrConfig.default_op_mode > CONTROL_MODE_POSITION_PROFILE)) {
+        UsrConfig.default_op_mode = CONTROL_MODE_POSITION_PROFILE;
+    }
+
     Controller.ctrl_mode = (tControlMode) UsrConfig.default_op_mode;
 
     CONTROLLER_update_input_pos_filter_gain(UsrConfig.position_filter_bw);
@@ -110,7 +119,7 @@ void CONTROLLER_update_input_pos_filter_gain(float bw)
 
 void CONTROLLER_reset(void)
 {
-    __disable_irq();
+    MOTOR_HW_enter_critical();
 
     float pos_meas = Encoder.pos;
 
@@ -138,12 +147,13 @@ void CONTROLLER_reset(void)
     Foc.current_ctrl_integral_d = 0;
     Foc.current_ctrl_integral_q = 0;
 
-    __enable_irq();
+    MOTOR_HW_exit_critical();
 }
 
 void CONTROLLER_loop(void)
 {
-    float       vel_des;
+    float       vel_des        = 0.0f;
+    bool        position_hold_deadband = false;
     const float pos_meas       = Encoder.pos;
     const float vel_meas       = Encoder.vel;
     const float phase_meas     = Encoder.phase;
@@ -224,6 +234,17 @@ void CONTROLLER_loop(void)
         vel_des = Controller.vel_setpoint;
         if (Controller.ctrl_mode >= CONTROL_MODE_POSITION_FILTER) {
             float pos_err = Controller.pos_setpoint - pos_meas;
+
+            if ((Controller.ctrl_mode == CONTROL_MODE_POSITION_PROFILE) && Traj.profile_done
+                && (ABS(pos_err) < UsrConfig.target_position_window)) {
+                pos_err                   = 0.0f;
+                vel_des                   = 0.0f;
+                Controller.vel_setpoint   = 0.0f;
+                Controller.cur_setpoint   = 0.0f;
+                Controller.vel_integrator = 0.0f;
+                position_hold_deadband    = true;
+            }
+
             vel_des += UsrConfig.pos_p_gain * pos_err;
         }
     } else {
@@ -243,7 +264,9 @@ void CONTROLLER_loop(void)
     float iq_set = Controller.cur_setpoint;
 
     float v_err = 0.0f;
-    if (Controller.ctrl_mode >= CONTROL_MODE_VELOCITY_RAMP) {
+    if (position_hold_deadband) {
+        iq_set = 0.0f;
+    } else if (Controller.ctrl_mode >= CONTROL_MODE_VELOCITY_RAMP) {
         v_err = vel_des - vel_meas;
         iq_set += UsrConfig.vel_p_gain * v_err;
 
@@ -259,7 +282,7 @@ void CONTROLLER_loop(void)
     }
 
     // Anticogging
-    if (UsrConfig.anticogging_enable && AnticoggingValid) {
+    if ((!position_hold_deadband) && UsrConfig.anticogging_enable && AnticoggingValid) {
         int16_t index = nearbyintf(COGGING_MAP_NUM * Encoder.count_in_cpr / ENCODER_CPR_F);
         if (index >= COGGING_MAP_NUM) {
             index = 0;
@@ -281,7 +304,7 @@ void CONTROLLER_loop(void)
     FOC_current(0, iq_set, phase_meas, phase_vel_meas);
 
     // Velocity integrator
-    if (Controller.ctrl_mode < CONTROL_MODE_VELOCITY_RAMP) {
+    if ((Controller.ctrl_mode < CONTROL_MODE_VELOCITY_RAMP) || position_hold_deadband) {
         // reset integral if not in use
         Controller.vel_integrator = 0.0f;
     } else {

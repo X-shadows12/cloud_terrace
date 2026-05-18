@@ -17,7 +17,7 @@
 #ifndef __CONTROLLER_H__
 #define __CONTROLLER_H__
 
-#include "main.h"
+#include "ctm_types.h"
 
 typedef enum {
     CONTROL_MODE_CURRENT_RAMP     = 0,

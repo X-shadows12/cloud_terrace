@@ -16,12 +16,12 @@
         <TargetCommonOption>
           <Device>GD32H759IM</Device>
           <Vendor>GigaDevice</Vendor>
-          <PackID>GigaDevice.GD32H7xx_DFP.0.0.17</PackID>
-          <PackURL>https://gd32mcu.com/data/documents/pack/</PackURL>
-          <Cpu>IRAM(0x24000000,0x000E0000) IRAM2(0x00000000,0x00010000) IROM(0x08000000,0x03C0000) XRAM(0x20000000,0x00010000) XRAM2(0x30000000,0x00004000) XRAM3(0x30004000,0x00004000) CPUTYPE("Cortex-M7") FPU3(DFPU) CLOCK(12000000) ELITTLE</Cpu>
+          <PackID>GigaDevice.GD32H7xx_DFP.1.4.0</PackID>
+          <PackURL>https://gd32mcu.com</PackURL>
+          <Cpu>IRAM(0x24000000,0x000E0000) IRAM2(0x00000000,0x00010000) IROM(0x08080000,0x00010000) XRAM(0x20000000,0x00010000) XRAM2(0x30000000,0x00004000) XRAM3(0x30004000,0x00004000) CPUTYPE("Cortex-M7") FPU3(DFPU) CLOCK(12000000) ELITTLE</Cpu>
           <FlashUtilSpec></FlashUtilSpec>
           <StartupFile></StartupFile>
-          <FlashDriverDll>UL2CM3(-S0 -C0 -P0 -FD24000000 -FC2000 -FN1 -FF0GD32H7xx_3840KB -FS08000000 -FL03C0000 -FP0($$Device:GD32H759IM$Flash\GD32H7xx_3840KB.FLM))</FlashDriverDll>
+          <FlashDriverDll>UL2CM3(-S0 -C0 -P0 -FD24000000 -FC2000 -FN1 -FF0GD32H7xx_3840KB -FS08080000 -FL010000 -FP0($$Device:GD32H759IM$Flash\GD32H7xx_3840KB.FLM))</FlashDriverDll>
           <DeviceId>0</DeviceId>
           <RegisterFile>$$Device:GD32H759IM$Device\Include\gd32h7xx.h</RegisterFile>
           <MemoryEnv></MemoryEnv>
@@ -82,7 +82,7 @@
           <AfterMake>
             <RunUserProg1>1</RunUserProg1>
             <RunUserProg2>0</RunUserProg2>
-            <UserProg1Name>"$K\ARM\ARMCC\bin\fromelf.exe" --bincombined "!L" --output="$L\@L.bin"</UserProg1Name>
+            <UserProg1Name>..\..\export_flash_bin.bat "$K\ARM\ARMCC\bin\fromelf.exe" "!L" "$L\@L.bin"</UserProg1Name>
             <UserProg2Name></UserProg2Name>
             <UserProg1Dos16Mode>0</UserProg1Dos16Mode>
             <UserProg2Dos16Mode>0</UserProg2Dos16Mode>
@@ -181,12 +181,13 @@
             <uocRam>0</uocRam>
             <hadIROM>1</hadIROM>
             <hadIRAM>1</hadIRAM>
-            <hadXRAM>0</hadXRAM>
+            <hadXRAM>1</hadXRAM>
             <uocXRam>0</uocXRam>
             <RvdsVP>2</RvdsVP>
             <RvdsMve>0</RvdsMve>
             <RvdsCdeCp>0</RvdsCdeCp>
-            <hadIRAM2>0</hadIRAM2>
+            <nBranchProt>0</nBranchProt>
+            <hadIRAM2>1</hadIRAM2>
             <hadIROM2>0</hadIROM2>
             <StupSel>8</StupSel>
             <useUlib>1</useUlib>
@@ -245,8 +246,8 @@
               </Ocm6>
               <IRAM>
                 <Type>0</Type>
-                <StartAddress>0x20000000</StartAddress>
-                <Size>0x8000</Size>
+                <StartAddress>0x24000000</StartAddress>
+                <Size>0xe0000</Size>
               </IRAM>
               <IROM>
                 <Type>1</Type>
@@ -254,9 +255,9 @@
                 <Size>0x10000</Size>
               </IROM>
               <XRAM>
-                <Type>0</Type>
-                <StartAddress>0x0</StartAddress>
-                <Size>0x0</Size>
+                <Type>1</Type>
+                <StartAddress>0x20000000</StartAddress>
+                <Size>0x10000</Size>
               </XRAM>
               <OCR_RVCT1>
                 <Type>1</Type>
@@ -289,14 +290,14 @@
                 <Size>0x0</Size>
               </OCR_RVCT6>
               <OCR_RVCT7>
-                <Type>0</Type>
-                <StartAddress>0x0</StartAddress>
-                <Size>0x0</Size>
+                <Type>1</Type>
+                <StartAddress>0x30000000</StartAddress>
+                <Size>0x4000</Size>
               </OCR_RVCT7>
               <OCR_RVCT8>
-                <Type>0</Type>
-                <StartAddress>0x0</StartAddress>
-                <Size>0x0</Size>
+                <Type>1</Type>
+                <StartAddress>0x30004000</StartAddress>
+                <Size>0x4000</Size>
               </OCR_RVCT8>
               <OCR_RVCT9>
                 <Type>0</Type>
@@ -306,7 +307,7 @@
               <OCR_RVCT10>
                 <Type>0</Type>
                 <StartAddress>0x0</StartAddress>
-                <Size>0x0</Size>
+                <Size>0x10000</Size>
               </OCR_RVCT10>
             </OnChipMemories>
             <RvctStartVector></RvctStartVector>

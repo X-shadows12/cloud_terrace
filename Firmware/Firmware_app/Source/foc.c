@@ -15,7 +15,7 @@
 */
 
 #include "foc.h"
-#include "pwm_curr.h"
+#include "motor_hw.h"
 #include "usr_config.h"
 #include "util.h"
 #include <math.h>
@@ -49,7 +49,7 @@ void FOC_arm(void)
         return;
     }
 
-    __disable_irq();
+    MOTOR_HW_enter_critical();
 
     Foc.i_q        = 0;
     Foc.i_q_filt   = 0;
@@ -60,11 +60,11 @@ void FOC_arm(void)
     Foc.current_ctrl_integral_d = 0;
     Foc.current_ctrl_integral_q = 0;
 
-    PWMC_TurnOnLowSides();
+    MOTOR_HW_turn_on_low_sides();
 
     Foc.is_armed = true;
 
-    __enable_irq();
+    MOTOR_HW_exit_critical();
 }
 
 void FOC_disarm(void)
@@ -73,7 +73,7 @@ void FOC_disarm(void)
         return;
     }
 
-    __disable_irq();
+    MOTOR_HW_enter_critical();
 
     Foc.i_q        = 0;
     Foc.i_q_filt   = 0;
@@ -81,11 +81,11 @@ void FOC_disarm(void)
     Foc.i_bus_filt = 0;
     Foc.power_filt = 0;
 
-    PWMC_SwitchOffPWM();
+    MOTOR_HW_switch_off_pwm();
 
     Foc.is_armed = false;
 
-    __enable_irq();
+    MOTOR_HW_exit_critical();
 }
 
 void FOC_voltage(float Vd_set, float Vq_set, float phase)
@@ -108,9 +108,7 @@ void FOC_voltage(float Vd_set, float Vq_set, float phase)
 
     // SVM
     if (0 == svm(alpha, beta, &Foc.dtc_a, &Foc.dtc_b, &Foc.dtc_c)) {
-        set_a_duty((uint16_t) (Foc.dtc_a * (float) HALF_PWM_PERIOD_CYCLES));
-        set_b_duty((uint16_t) (Foc.dtc_b * (float) HALF_PWM_PERIOD_CYCLES));
-        set_c_duty((uint16_t) (Foc.dtc_c * (float) HALF_PWM_PERIOD_CYCLES));
+        MOTOR_HW_set_phase_duty(Foc.dtc_a, Foc.dtc_b, Foc.dtc_c);
     }
 }
 
@@ -154,9 +152,7 @@ void FOC_current(float Id_set, float Iq_set, float phase, float phase_vel)
 
     // SVM
     if (0 == svm(alpha, beta, &Foc.dtc_a, &Foc.dtc_b, &Foc.dtc_c)) {
-        set_a_duty((uint16_t) (Foc.dtc_a * (float) HALF_PWM_PERIOD_CYCLES));
-        set_b_duty((uint16_t) (Foc.dtc_b * (float) HALF_PWM_PERIOD_CYCLES));
-        set_c_duty((uint16_t) (Foc.dtc_c * (float) HALF_PWM_PERIOD_CYCLES));
+        MOTOR_HW_set_phase_duty(Foc.dtc_a, Foc.dtc_b, Foc.dtc_c);
     }
 
     // used for report

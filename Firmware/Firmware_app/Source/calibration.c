@@ -21,7 +21,8 @@
 #include "foc.h"
 #include "heap.h"
 #include "mc_task.h"
-#include "pwm_curr.h"
+#include "motor_hw.h"
+#include "rtt_scope.h"
 #include "usr_config.h"
 #include "util.h"
 
@@ -137,7 +138,7 @@ void CALIBRATION_loop(void)
         FOC_voltage(voltages[0], 0, 0);
 
         if (loop_count >= num_R_cycles) {
-            PWMC_TurnOnLowSides();
+            MOTOR_HW_turn_on_low_sides();
             mCalibStep = CS_MOTOR_R_END;
         }
         break;
@@ -171,7 +172,7 @@ void CALIBRATION_loop(void)
         FOC_voltage(voltages[i], 0, 0);
 
         if (loop_count >= (num_L_cycles << 1)) {
-            PWMC_TurnOnLowSides();
+            MOTOR_HW_turn_on_low_sides();
             mCalibStep = CS_MOTOR_L_END;
         }
     } break;
@@ -312,7 +313,7 @@ void CALIBRATION_loop(void)
 
             phase_set -= calib_phase_vel * CURRENT_MEASURE_PERIOD;
         } else {
-            PWMC_TurnOnLowSides();
+            MOTOR_HW_turn_on_low_sides();
             mCalibStep = CS_ENCODER_END;
             break;
         }

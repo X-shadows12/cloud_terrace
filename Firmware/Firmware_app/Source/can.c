@@ -15,11 +15,13 @@
 */
 
 #include "can.h"
+#include "can_hw.h"
 #include "controller.h"
 #include "dfu.h"
 #include "encoder.h"
 #include "foc.h"
-#include "pwm_curr.h"
+#include "motor_hw.h"
+#include "runtime.h"
 #include "usr_config.h"
 #include "util.h"
 #include <string.h>
@@ -27,8 +29,8 @@
 #define CAN_DIAG_ENABLE 1
 
 #if CAN_DIAG_ENABLE
-#include "SEGGER_RTT.h"
-#define CAN_LOG(format, ...) SEGGER_RTT_printf(0, format, ##__VA_ARGS__)
+#include "rtt_scope.h"
+#define CAN_LOG(format, ...) DEBUG(format, ##__VA_ARGS__)
 #else
 #define CAN_LOG(format, ...)
 #endif
@@ -38,16 +40,10 @@ static uint32_t mRxTick       = 0;
 static uint32_t mTxTick       = 0;
 static uint32_t mCanBusErrNew = 0;
 static uint32_t mCanBusErrOld = 0;
-static FlagStatus mCanTxPrimed = RESET;
-
-static can_mailbox_descriptor_struct mCanRxMessage;
-static uint32_t mCanRxData[2];
 
 static void can_error_check(void);
-static void can_baudrate_config(int baudrate, can_parameter_struct *can_parameter);
-static void can_rx_mailbox_arm(void);
 static bool can_tx(CanFrame *tx_frame);
-static bool can_rx(CanFrame *rx_frame);
+static bool can_is_idle_and_disarmed(void);
 static const char *can_cmd_name(uint8_t cmd);
 static bool can_cmd_is_critical(uint8_t cmd);
 static void can_log_frame(const char *tag, const CanFrame *frame);
@@ -55,43 +51,14 @@ static void can_log_frame(const char *tag, const CanFrame *frame);
 static void fill_value(uint8_t idx, uint8_t *data);
 static void parse_frame(CanFrame *frame);
 static void config_callback(uint8_t *data, bool isSet);
+static void config_reject(uint8_t *data);
+static bool config_value_is_valid(int32_t idx, uint8_t *value);
+static bool int32_in_range(int32_t value, int32_t min_value, int32_t max_value);
+static bool float_in_range(float value, float min_value, float max_value);
 
 void CAN_set_node_id(uint8_t nodeID)
 {
     mNodeID = nodeID;
-}
-
-void CAN_hw_init(int baudrate)
-{
-    can_parameter_struct can_parameter;
-
-    can_interrupt_disable(CTM_H759_CAN, CAN_INT_MB0);
-    can_deinit(CTM_H759_CAN);
-
-    can_struct_para_init(CAN_INIT_STRUCT, &can_parameter);
-    can_parameter.internal_counter_source          = CAN_TIMER_SOURCE_BIT_CLOCK;
-    can_parameter.self_reception                   = DISABLE;
-    can_parameter.mb_tx_order                      = CAN_TX_HIGH_PRIORITY_MB_FIRST;
-    can_parameter.mb_tx_abort_enable               = ENABLE;
-    can_parameter.local_priority_enable            = DISABLE;
-    can_parameter.mb_rx_ide_rtr_type               = CAN_IDE_RTR_FILTERED;
-    can_parameter.mb_remote_frame                  = CAN_STORE_REMOTE_REQUEST_FRAME;
-    can_parameter.rx_private_filter_queue_enable   = DISABLE;
-    can_parameter.edge_filter_enable               = DISABLE;
-    can_parameter.protocol_exception_enable        = DISABLE;
-    can_parameter.rx_filter_order                  = CAN_RX_FILTER_ORDER_MAILBOX_FIRST;
-    can_parameter.memory_size                      = CAN_MEMSIZE_32_UNIT;
-    /* Accept all CAN IDs; protocol filtering is handled in parse_frame(). */
-    can_parameter.mb_public_filter                 = 0x00000000U;
-    can_baudrate_config(baudrate, &can_parameter);
-
-    can_init(CTM_H759_CAN, &can_parameter);
-    can_operation_mode_enter(CTM_H759_CAN, CAN_NORMAL_MODE);
-
-    can_rx_mailbox_arm();
-    can_interrupt_enable(CTM_H759_CAN, CAN_INT_MB0);
-    mCanTxPrimed = RESET;
-    CAN_LOG("[CAN] init baud=%d node=%u\n", baudrate, (unsigned)mNodeID);
 }
 
 void CAN_comm_loop(void)
@@ -121,7 +88,7 @@ void CAN_comm_loop(void)
 void CAN_receive_callback(void)
 {
     CanFrame rxframe;
-    while (can_rx(&rxframe)) {
+    while (CAN_hw_receive(&rxframe)) {
         parse_frame(&rxframe);
     }
 }
@@ -175,16 +142,7 @@ void CAN_anticogging_report(int32_t step, int32_t value)
 
 static void can_error_check(void)
 {
-    mCanBusErrNew = (uint32_t) can_error_state_get(CTM_H759_CAN);
-    if (SET == can_flag_get(CTM_H759_CAN, CAN_FLAG_RX_WARNING)) {
-        mCanBusErrNew |= (1UL << 8);
-    }
-    if (SET == can_flag_get(CTM_H759_CAN, CAN_FLAG_TX_WARNING)) {
-        mCanBusErrNew |= (1UL << 9);
-    }
-    if (SET == can_flag_get(CTM_H759_CAN, CAN_FLAG_BUSOFF)) {
-        mCanBusErrNew |= (1UL << 10);
-    }
+    mCanBusErrNew = CAN_hw_status_bits();
 
     if (mCanBusErrOld != mCanBusErrNew) {
         mCanBusErrOld = mCanBusErrNew;
@@ -196,129 +154,31 @@ static void can_error_check(void)
 
         if ((CAN_ERROR_STATE_PASSIVE == (can_error_state_enum) (mCanBusErrNew & 0x03U))
             || (CAN_ERROR_STATE_BUS_OFF == (can_error_state_enum) (mCanBusErrNew & 0x03U))) {
-            can_mailbox_transmit_abort(CTM_H759_CAN, CTM_H759_CAN_TX_MAILBOX);
-            mCanTxPrimed = RESET;
-            can_rx_mailbox_arm();
+            CAN_hw_abort_tx();
         }
     }
-}
-
-static void can_baudrate_config(int baudrate, can_parameter_struct *can_parameter)
-{
-    can_parameter->resync_jump_width = 1U;
-    can_parameter->prop_time_segment = 2U;
-    can_parameter->time_segment_1    = 9U;
-    can_parameter->time_segment_2    = 3U;
-
-    switch ((tCanBaudrate) baudrate) {
-    case CAN_BAUDRATE_250K:
-        can_parameter->prescaler = 80U;
-        break;
-
-    case CAN_BAUDRATE_500K:
-        can_parameter->prescaler = 40U;
-        break;
-
-    case CAN_BAUDRATE_800K:
-        can_parameter->prescaler = 25U;
-        break;
-
-    case CAN_BAUDRATE_1000K:
-        can_parameter->prescaler = 20U;
-        break;
-
-    default:
-        can_parameter->prescaler = 40U;
-        break;
-    }
-}
-
-static void can_rx_mailbox_arm(void)
-{
-    memset(mCanRxData, 0, sizeof(mCanRxData));
-    can_struct_para_init(CAN_MDSC_STRUCT, &mCanRxMessage);
-    mCanRxMessage.rtr        = 0U;
-    mCanRxMessage.ide        = 0U;
-    mCanRxMessage.code       = CAN_MB_RX_STATUS_EMPTY;
-    mCanRxMessage.id         = 0U;
-    mCanRxMessage.data       = mCanRxData;
-    mCanRxMessage.data_bytes = 8U;
-    can_mailbox_config(CTM_H759_CAN, CTM_H759_CAN_RX_MAILBOX, &mCanRxMessage);
 }
 
 static bool can_tx(CanFrame *tx_frame)
 {
-    can_mailbox_descriptor_struct tx_message;
-    uint32_t                    tx_data[2];
-    uint8_t dlc = tx_frame->dlc > 8U ? 8U : tx_frame->dlc;
-    bool busy = false;
-    bool sent = false;
-    uint32_t primask;
+    bool sent = CAN_hw_send(tx_frame);
 
-    primask = __get_PRIMASK();
-    __disable_irq();
-    if ((SET == mCanTxPrimed) && (RESET == can_flag_get(CTM_H759_CAN, CAN_FLAG_MB1))) {
-        busy = true;
-    } else {
-        if (SET == mCanTxPrimed) {
-            can_flag_clear(CTM_H759_CAN, CAN_FLAG_MB1);
-        }
-
-        memset(tx_data, 0, sizeof(tx_data));
-        memcpy((uint8_t *) tx_data, tx_frame->data, dlc);
-
-        can_struct_para_init(CAN_MDSC_STRUCT, &tx_message);
-        tx_message.rtr        = 0U;
-        tx_message.ide        = 0U;
-        tx_message.code       = CAN_MB_TX_STATUS_DATA;
-        tx_message.brs        = 0U;
-        tx_message.fdf        = 0U;
-        tx_message.prio       = 0U;
-        tx_message.data_bytes = dlc;
-        tx_message.data       = tx_data;
-        tx_message.id         = tx_frame->id & 0x7FFU;
-        can_mailbox_config(CTM_H759_CAN, CTM_H759_CAN_TX_MAILBOX, &tx_message);
-
-        mCanTxPrimed = SET;
+    if (sent) {
         CAN_reset_tx_timeout();
-        sent = true;
-    }
-    __set_PRIMASK(primask);
-
-    if (busy && can_cmd_is_critical(GET_CMD(tx_frame->id))) {
+    } else if (can_cmd_is_critical(GET_CMD(tx_frame->id))) {
         CAN_LOG("[CAN] tx busy id=0x%03X cmd=%u(%s) dlc=%u\n",
                 (unsigned) (tx_frame->id & 0x7FFU),
                 (unsigned) GET_CMD(tx_frame->id),
                 can_cmd_name(GET_CMD(tx_frame->id)),
-                (unsigned) dlc);
+                (unsigned) tx_frame->dlc);
     }
 
     return sent;
 }
 
-static bool can_rx(CanFrame *rx_frame)
+static bool can_is_idle_and_disarmed(void)
 {
-    uint8_t dlc;
-
-    if (RESET == can_interrupt_flag_get(CTM_H759_CAN, CAN_INT_FLAG_MB0)) {
-        return false;
-    }
-
-    if (SUCCESS != can_mailbox_receive_data_read(CTM_H759_CAN, CTM_H759_CAN_RX_MAILBOX, &mCanRxMessage)) {
-        can_interrupt_flag_clear(CTM_H759_CAN, CAN_INT_FLAG_MB0);
-        can_rx_mailbox_arm();
-        CAN_LOG("[CAN] rx read failed\n");
-        return false;
-    }
-
-    dlc = mCanRxMessage.data_bytes > 8U ? 8U : (uint8_t) mCanRxMessage.data_bytes;
-    rx_frame->id  = mCanRxMessage.id & 0x7FFU;
-    rx_frame->dlc = dlc;
-    memcpy(rx_frame->data, (uint8_t *) mCanRxData, dlc);
-
-    can_rx_mailbox_arm();
-
-    return true;
+    return ((MCT_get_state() == IDLE) && (!Foc.is_armed));
 }
 
 static const char *can_cmd_name(uint8_t cmd)
@@ -464,11 +324,11 @@ static void fill_value(uint8_t idx, uint8_t *data)
         break;
 
     case 6:
-        float_to_data((float) read_drv_temp(), data);
+        float_to_data((float) MOTOR_HW_read_driver_temp(), data);
         break;
 
     case 7:
-        float_to_data((float) read_ntc_temp(), data);
+        float_to_data((float) MOTOR_HW_read_ntc_temp(), data);
         break;
 
     default:
@@ -504,7 +364,7 @@ static void parse_frame(CanFrame *frame)
 
     switch (cmd) {
     case CAN_CMD_SET_OP_MODE:
-        ret            = CONTROLLER_set_op_mode((tControlMode) frame->data[0]);
+        ret            = (frame->dlc == 1U) ? CONTROLLER_set_op_mode((tControlMode) frame->data[0]) : -1;
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
@@ -634,28 +494,40 @@ static void parse_frame(CanFrame *frame)
         break;
 
     case CAN_CMD_SET_CONFIG:
-        config_callback(frame->data, true);
+        if (frame->dlc == 8U) {
+            config_callback(frame->data, true);
+        } else {
+            config_reject(frame->data);
+        }
         frame->dlc = 8;
         echo       = true;
         break;
 
     case CAN_CMD_GET_CONFIG:
-        config_callback(frame->data, false);
+        if (frame->dlc == 8U) {
+            config_callback(frame->data, false);
+        } else {
+            config_reject(frame->data);
+        }
         frame->dlc = 8;
         echo       = true;
         break;
 
     case CAN_CMD_SAVE_ALL_CONFIG:
-        ret = 0;
-        ret += USR_CONFIG_save_config();
-        ret += USR_CONFIG_save_cogging_map();
+        if (can_is_idle_and_disarmed()) {
+            ret = 0;
+            ret += USR_CONFIG_save_config();
+            ret += USR_CONFIG_save_cogging_map();
+        } else {
+            ret = -1;
+        }
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
         break;
 
     case CAN_CMD_RESET_ALL_CONFIG:
-        if (MCT_get_state() == IDLE) {
+        if (can_is_idle_and_disarmed()) {
             USR_CONFIG_set_default_config();
             USR_CONFIG_set_default_cogging_map();
             ret = 0;
@@ -675,16 +547,20 @@ static void parse_frame(CanFrame *frame)
         break;
 
     case CAN_CMD_DFU_START:
-        MCT_set_state(IDLE);
-        watch_dog_feed();
-        ret            = DFU_write_app_back_start();
+        ret = MCT_set_state(IDLE);
+        if ((ret == 0) && can_is_idle_and_disarmed()) {
+            watch_dog_feed();
+            ret = DFU_write_app_back_start();
+        } else {
+            ret = -1;
+        }
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
         break;
 
     case CAN_CMD_DFU_DATA:
-        ret            = DFU_write_app_back(&frame->data[0], frame->dlc);
+        ret            = can_is_idle_and_disarmed() ? DFU_write_app_back(&frame->data[0], frame->dlc) : -1;
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
@@ -692,7 +568,11 @@ static void parse_frame(CanFrame *frame)
 
     case CAN_CMD_DFU_END:
         watch_dog_feed();
-        ret            = DFU_check_app_back(data_to_uint32(&frame->data[0]), data_to_uint32(&frame->data[4]));
+        if ((frame->dlc == 8U) && can_is_idle_and_disarmed()) {
+            ret = DFU_check_app_back(data_to_uint32(&frame->data[0]), data_to_uint32(&frame->data[4]));
+        } else {
+            ret = -1;
+        }
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
@@ -727,19 +607,110 @@ static void config_callback(uint8_t *data, bool isSet)
     int32_t idx           = data_to_int32(data) - 1;
     int32_t config_number = sizeof(tUsrConfig) / 4 - 132;
 
-    if (idx >= config_number) {
-        int32_to_data(-1, &data[0]);
-        int32_to_data(0, &data[4]);
+    if ((idx < 0) || (idx >= config_number)) {
+        config_reject(data);
         return;
     }
 
     uint32_t *pConfig = &(((uint32_t *) (&UsrConfig))[idx]);
 
     if (isSet) {
+        if (!config_value_is_valid(idx, &data[4])) {
+            config_reject(data);
+            return;
+        }
+
         memcpy(pConfig, &data[4], 4);
         FOC_update_current_ctrl_gain(UsrConfig.current_ctrl_bw);
         CONTROLLER_update_input_pos_filter_gain(UsrConfig.position_filter_bw);
     } else {
         memcpy(&data[4], pConfig, 4);
     }
+}
+
+static void config_reject(uint8_t *data)
+{
+    int32_to_data(-1, &data[0]);
+    int32_to_data(0, &data[4]);
+}
+
+static bool config_value_is_valid(int32_t idx, uint8_t *value)
+{
+    switch (idx) {
+    case 0:
+        return int32_in_range(data_to_int32(value), 0, 1);
+    case 1:
+        return int32_in_range(data_to_int32(value), 2, 30);
+    case 2:
+        return float_in_range(data_to_float(value), 0.0f, 10.0f);
+    case 3:
+        return float_in_range(data_to_float(value), 1.0e-9f, 1.0f);
+    case 4:
+        return float_in_range(data_to_float(value), 0.0f, 10.0f);
+    case 5:
+        return float_in_range(data_to_float(value), 0.0f, 100.0f);
+    case 6:
+        return float_in_range(data_to_float(value), 1.0e-6f, 10.0f);
+    case 7:
+        return float_in_range(data_to_float(value), 1.0e-6f, 50.0f);
+    case 8:
+    case 9:
+    case 10:
+        return float_in_range(data_to_float(value), 0.0f, 1000000.0f);
+    case 11:
+        return float_in_range(data_to_float(value), -1000000.0f, 1000000.0f);
+    case 12:
+        return float_in_range(data_to_float(value), 100.0f, 2000.0f);
+    case 13:
+        return int32_in_range(data_to_int32(value), CONTROL_MODE_CURRENT_RAMP, CONTROL_MODE_POSITION_PROFILE);
+    case 14:
+    case 15:
+        return int32_in_range(data_to_int32(value), 0, 1);
+    case 16:
+    case 17:
+        return float_in_range(data_to_float(value), 0.0f, 1000.0f);
+    case 18:
+        return float_in_range(data_to_float(value), 0.0f, 1000.0f);
+    case 19:
+        return float_in_range(data_to_float(value), 0.0f, 10000.0f);
+    case 20:
+        return float_in_range(data_to_float(value), 0.0f, 1000.0f);
+    case 21:
+        return float_in_range(data_to_float(value), 1.0e-6f, 1000.0f);
+    case 22:
+    case 23:
+        return float_in_range(data_to_float(value), 1.0e-6f, 10000.0f);
+    case 24: {
+        float voltage = data_to_float(value);
+        return (float_in_range(voltage, 0.0f, 50.0f) && (voltage < UsrConfig.protect_over_voltage));
+    }
+    case 25: {
+        float voltage = data_to_float(value);
+        return (float_in_range(voltage, 0.0f, 50.0f) && (voltage > UsrConfig.protect_under_voltage));
+    }
+    case 26:
+        return float_in_range(data_to_float(value), 0.0f, 10.0f);
+    case 27:
+    case 28:
+        return int32_in_range(data_to_int32(value), 0, 150);
+    case 29:
+        return int32_in_range(data_to_int32(value), 1, 31);
+    case 30:
+        return int32_in_range(data_to_int32(value), CAN_BAUDRATE_250K, CAN_BAUDRATE_1000K);
+    case 31:
+    case 32:
+        return int32_in_range(data_to_int32(value), 0, 600000);
+    default:
+        return false;
+    }
+}
+
+static bool int32_in_range(int32_t value, int32_t min_value, int32_t max_value)
+{
+    return ((value >= min_value) && (value <= max_value));
+}
+
+static bool float_in_range(float value, float min_value, float max_value)
+{
+    return ((value == value) && (value >= min_value) && (value <= max_value));
 }

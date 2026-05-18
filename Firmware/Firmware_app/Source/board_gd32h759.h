@@ -260,6 +260,14 @@
 #define CTM_H759_CAN_TX_MAILBOX               1U
 
 /* Debug, reset and simple inputs ------------------------------------------- */
+#define CTM_H759_HAS_STATUS_LED           0
+#define LED_ACT_SET()                     ((void) 0)
+#define LED_ACT_RESET()                   ((void) 0)
+#define LED_ACT_GET()                     (0U)
+
+#define ENC_NCS_SET()                     GPIO_BOP(CTM_H759_ENC_CS_PORT) = (uint32_t) CTM_H759_ENC_CS_PIN
+#define ENC_NCS_RESET()                   GPIO_BC(CTM_H759_ENC_CS_PORT) = (uint32_t) CTM_H759_ENC_CS_PIN
+
 #define CTM_H759_SWDIO_PORT                   GPIOA
 #define CTM_H759_SWDIO_PIN                    GPIO_PIN_13
 #define CTM_H759_SWCLK_PORT                   GPIOA

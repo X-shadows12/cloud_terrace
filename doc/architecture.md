@@ -1,172 +1,138 @@
-# CTM 驱动器工程架构说明
+# CTM GD32H759 工程架构说明
 
-本文档基于当前工作区源码、Keil 工程配置、README、硬件资料目录和发布产物整理，用于快速理解整个 CTM 三相永磁电机/BLDC/PMSM 驱动器工程的组成、运行路径和模块边界。
+本文档按当前工作区源码和 Keil 工程重新整理，描述 CTM 电机驱动器工程的目录结构、固件分层、实时任务、通信协议、Flash/DFU 边界和上位机配套关系。当前工程目标是 GD32H759 控制板上的三相永磁电机/BLDC/PMSM 驱动固件。
 
-## 1. 工程定位
+## 1. 工程组成
 
-CTM 是一个开源电机驱动器工程，包含：
-
-- 三相永磁电机/BLDC/PMSM 驱动固件
-- GD32H759 控制板硬件资料
-- Windows 上位机调试工具
-- 用户手册、原理图、3D 结构文件和调试截图
-
-固件核心能力包括 FOC 矢量控制、CAN 通信、位置/速度/电流控制、自动电机参数和编码器校准、齿槽转矩补偿、Flash 参数保存和 CAN DFU 固件升级。
-
-## 2. 顶层目录结构
+顶层目录以当前仓库实物为准：
 
 ```text
-dgm/
+ctm/
 ├─ Firmware/
-│  ├─ Firmware_app/          # 主应用固件：电机控制、通信、校准、DFU 接收
-│  ├─ Firmware_boot/         # 升级搬运 bootloader：备份区复制到主应用区
-│  └─ Release/               # 已构建的 bin/hex 发布产物
-├─ Hardware/                 # 原理图、3D STEP、GD32H759 数据手册/用户手册等
-├─ ctm_tool/                 # Windows 上位机调试程序
-├─ img/                      # README 和文档引用的产品/调试界面/控制框图图片
-├─ doc/                      # 项目文档目录，本文件位于此处
-├─ README.md                 # 项目介绍、参数、图片和使用说明
-└─ ctm驱动器用户手册.pdf       # 用户使用手册
+│  ├─ Firmware_app/          # 主应用固件：电机控制、CAN、校准、齿槽补偿、DFU 接收
+│  └─ Firmware_boot/         # Bootloader：把备份应用区搬运到主应用区
+├─ Hardware/                 # 原理图、3D STEP、GD32H759 数据手册和用户手册
+├─ HostTool/                 # Python/Tkinter 上位机，使用 ZLG ControlCAN.dll
+├─ doc/                      # 工程文档，本文件位于此处
+├─ img/                      # README/手册使用的图片资源
+├─ README.md                 # 原 CTM 项目介绍，部分旧描述需以当前源码为准
+└─ ctm驱动器用户手册.pdf
 ```
 
-## 3. 硬件与构建目标
+当前 `doc` 目录下只有 `architecture.md` 一个 Markdown 文件。
 
-### 3.1 MCU 与板级资源
+## 2. 构建目标
 
-当前工程目标从旧的 GD32C10x 迁移到 GD32H759，Keil 目标器件为 `GD32H759IM`，核心为 Cortex-M7，启用双精度 FPU，CMSIS/SPL 宏为：
+| 固件 | Keil 工程 | Target | Device | IROM |
+| --- | --- | --- | --- | --- |
+| 主应用 | `Firmware/Firmware_app/MDK-ARM/ctm_app.uvprojx` | `ctm_app` | `GD32H759IM` | `0x08000000`, size `0x3C0000` |
+| Bootloader | `Firmware/Firmware_boot/MDK-ARM/ctm_boot.uvprojx` | `ctm_boot` | `GD32H759IM` | `0x08080000`, size `0x10000` |
+
+主应用 Keil 宏定义为：
 
 ```text
 USE_STDPERIPH_DRIVER, GD32H7XX, GD32H7XXI, ARM_MATH_CM7
 ```
 
-板级资源集中在 `Firmware/Firmware_app/Source/board_gd32h759.h`：
+主应用包含业务源码、GD32H7xx 标准外设库、CMSIS、启动文件和 SEGGER RTT。Bootloader 只保留最小启动、Flash 擦写和搬运逻辑。
 
-- PWM：`TIMER0`，20 kHz，中点对齐，三相互补输出
-- 相电流 ADC：左电机默认使用 `ADC2` 的两个注入通道
-- 母线电压 ADC：`ADC1` 常规通道，带分压系数
-- 编码器 SPI：`SPI0`，16 位传输，默认选择左侧编码器 CS
-- CAN：`CAN2`，标准 11 bit ID，使用 mailbox 0 接收、mailbox 1 发送
-- 用户按键：`KEY1/PA0`、`KEY2/PC0`
-- 状态 LED：当前 GD32H759 控制板未暴露 MCU 驱动状态 LED，LED API 保留为空操作
+一致性注意：固件 DFU/Bootloader 逻辑仍把主应用运行区限制为 256 KB，见 `board_port.h` 的 `BOARD_FLASH_APP_MAX_SIZE = 0x40000`。当前 `ctm_app.uvprojx` 的 IROM 范围更大，发布给 DFU 的应用镜像必须保持在 256 KB 内，或同步调整 Flash map、Bootloader 和上位机限制。
 
-默认选择左侧电机驱动通道：
+## 3. 板级资源
 
-```c
-#if !defined(CTM_H759_USE_RIGHT_MOTOR)
-#define CTM_H759_USE_LEFT_MOTOR 1
-#endif
-```
+板级资源由 `board_gd32h759.h` 描述，再由 `board_port.h` 映射成通用 `BOARD_*` 接口。GD32H759 使用 25 MHz HXTAL，`system_gd32h7xx.c` 配置 PLL0 到 600 MHz 系统时钟；PWM 相关计时按 300 MHz 定时器时钟计算。
 
-如需切换右侧驱动，需要在编译宏中定义 `CTM_H759_USE_RIGHT_MOTOR`，且不能同时定义左右两侧。
+主要资源如下：
 
-### 3.2 Keil 工程
+| 资源 | 当前实现 |
+| --- | --- |
+| MCU | `GD32H759`, LQFP176, Cortex-M7 |
+| PWM | `TIMER0`, 20 kHz, 中心对齐，三相互补输出 |
+| 默认电机侧 | 左侧驱动；定义 `CTM_H759_USE_RIGHT_MOTOR` 可切换右侧 |
+| 相电流采样 | 左侧：`ADC2` 的 `PC2_C/ADC2_IN0` 和 `PC3_C/ADC2_IN1`；右侧：`ADC0` 的 `PF11/PF12` |
+| 母线电压 | `PF13/ADC1_IN2`, 分压系数 11 |
+| 编码器默认接口 | PWM 绝对值编码器，`PB8/TIMER3_CH2/AF2`, 2 MHz 捕获 tick, 32768 CPR |
+| 兼容编码器接口 | SPI0 磁编码器读数路径仍保留，可通过 `CTM_H759_ENCODER_INTERFACE` 切换 |
+| CAN | `CAN2`, `PD12/PD13`, classic CAN 标准帧，mailbox 0 接收、mailbox 1 发送 |
+| 用户按键 | `KEY1/PA0`, `KEY2/PC0` |
+| 状态 LED | 当前板图未提供 MCU 驱动 LED，`LED_ACT_*` 是空操作 |
 
-| 工程 | 路径 | 目标 | IROM |
+左右驱动共用 `TIMER0`，右侧 HIN/LIN 与左侧在主/互补输出上的关系相反。代码通过编译期宏只选择一侧，不能同时启用左右两侧。
+
+## 4. 新固件分层
+
+本次工程改动把原先集中在 `main.c`、`encoder.c`、`can.c`、`dfu.c`、`usr_config.c` 中的硬件相关代码拆成较清晰的板级/硬件抽象层：
+
+| 层级 | 文件 | 职责 |
+| --- | --- | --- |
+| 板级资源表 | `board_gd32h759.h` | GD32H759 引脚、外设、左右电机侧、编码器接口和 CAN 资源 |
+| 板级适配口 | `board_port.h` | 把具体板卡资源映射为 `BOARD_*` 通用宏，集中定义 Flash map |
+| 初始化 | `board_init.c/.h` | RCU、GPIO、SPI、ADC、PWM、系统定时器、NVIC、看门狗、MPU/Cache |
+| 运行时 | `runtime.c/.h` | `SystickCount`、毫秒延时、看门狗喂狗、时间差计算 |
+| 电机硬件门面 | `motor_hw.h` + `pwm_curr.c` | PWM 开关、三相 duty、相电流、母线电压、温度读取 |
+| PWM/电流细节 | `pwm_curr.c/.h`, `pwm_curr_hw.h` | 20 kHz PWM、ADC 校准、ADC 标定和电流/电压换算 |
+| 编码器硬件 | `encoder_hw.c/.h` | PWM 捕获编码器读数，兼容原 SPI 编码器读数 |
+| CAN 硬件 | `can_hw.c/.h` | GD32 CAN2 初始化、收发、状态位、mailbox 复位 |
+| Flash 硬件 | `flash_hw.c/.h` | 擦除、写 word、读后校验、DCache 失效、跳转 Bootloader |
+| RTT 调试 | `rtt_scope.c/.h`, `rtt_mem.h` | RTT 日志和示波数据，XRAM3 非缓存窗口 |
+| 状态 LED 兼容 | `status_led.h` | 为没有 LED 的板卡提供空操作 fallback |
+| 公共类型 | `ctm_types.h` | `stdbool.h/stdint.h/stddef.h` 聚合 |
+
+业务层仍由 `mc_task`、`controller`、`foc`、`encoder`、`calibration`、`anticogging`、`can`、`dfu`、`usr_config`、`trapTraj`、`util` 等模块组成。
+
+## 5. 启动流程
+
+主应用入口在 `Firmware/Firmware_app/Source/main.c`：
+
+1. 关闭全局中断。
+2. 配置 RTT 所在 XRAM3 的 MPU 属性，再初始化 RTT。
+3. 打开 ICache/DCache。
+4. `BOARD_init_peripherals()` 初始化 RCU、GPIO、SPI/编码器、相电流 ADC、母线 ADC、PWM、1 ms 系统定时器、引脚锁和 NVIC。
+5. 初始化独立看门狗。
+6. 读取用户配置，CRC 错误则加载默认值。
+7. 读取齿槽补偿表，CRC 正确则置 `AnticoggingValid = true`，失败则建立全零表。
+8. 按 `UsrConfig.node_id` 和 `UsrConfig.can_baudrate` 初始化 CAN。
+9. 初始化状态机、FOC、PWMC、编码器和控制器。
+10. 使能看门狗和全局中断。
+11. 等待母线电压稳定，随后做 64 次相电流零点偏置标定。
+12. 标定失败则置 `selftest` 错误，最后切到 `IDLE`。
+13. 主循环持续执行 `MCT_low_priority_task()`。
+
+严重异常统一进入 `Error_Handler()`，它会调用 `BOARD_emergency_shutdown()` 关闭 PWM 主输出并停在死循环。
+
+## 6. 实时任务
+
+固件是裸机结构，没有 RTOS。实时路径由中断优先级分层：
+
+| 触发 | 频率 | 入口 | 职责 |
 | --- | --- | --- | --- |
-| 主应用 | `Firmware/Firmware_app/MDK-ARM/ctm_app.uvprojx` | `ctm_app` | `0x08000000`, size `0x40000` |
-| Bootloader | `Firmware/Firmware_boot/MDK-ARM/ctm_boot.uvprojx` | `ctm_boot` | `0x08080000`, size `0x10000` |
+| 相电流 ADC 注入转换完成 | 20 kHz | `BOARD_PHASE_ADC_IRQHandler()` -> `MCT_high_frequency_task()` | 编码器采样、相电流/母线电压更新、状态机切换、控制器、FOC、过流检查、RTT scope |
+| `TIMER1` 更新中断 | 1 kHz | `BOARD_SYSTEM_TIMER_IRQHandler()` -> `MCT_safety_task()` | 过压/欠压/温度检查、喂狗、`SystickCount++` |
+| `CAN2` mailbox 0 中断 | 按帧触发 | `BOARD_CAN_IRQHandler()` -> `CAN_receive_callback()` | 读取 mailbox，解析协议命令 |
+| `TIMER3_CH2` 捕获中断 | PWM 编码器边沿触发 | `TIMER3_IRQHandler()` -> `ENCODER_pwm_capture_callback()` | PWM 编码器高电平和周期捕获 |
+| 主循环 | 尽快执行 | `MCT_low_priority_task()` | 状态字变化上报、LED 模式、CAN 心跳和 bus error 检查 |
 
-主应用包含业务源码、GD32H7xx 标准外设库、CMSIS 启动文件和 SEGGER RTT；bootloader 只包含最小启动文件、Flash/FWDGT/PMU 等外设库和升级搬运逻辑。
-
-### 3.3 时钟
-
-`system_gd32h7xx.c` 选择 25 MHz HXTAL，经 PLL0 配置为 600 MHz 系统时钟。`main.c` 中将 TIMER 时钟预分频配置为 `RCU_TIMER_PSC_MUL2`，PWM 相关宏按 `TIMER0_CLK_MHz = 300` 计算。
-
-## 4. Flash 内存布局
-
-Flash 基址来自 GD32H7xx 头文件：`FLASH_BASE = 0x08000000`。
-
-| 区域 | 地址 | 大小 | 用途 |
-| --- | --- | --- | --- |
-| `APP_MAIN` | `0x08000000` | `0x40000` / 256 KB | 主应用运行区 |
-| `APP_BACK` | `0x08040000` | `0x40000` / 256 KB | DFU 下载备份区 |
-| `BOOTLOADER` | `0x08080000` | `0x10000` / 64 KB | 升级搬运程序 |
-| `USR_CONFIG` | `0x08090000` | `0x1000` / 4 KB | 用户参数，带 CRC |
-| `COGGING_MAP` | `0x08091000` | `0x4000` / 16 KB | 齿槽补偿表，带 CRC |
-
-升级链路为：
-
-1. 上位机通过 CAN 下发 `DFU_START`，主应用擦除 `APP_BACK`。
-2. 上位机通过 `DFU_DATA` 分包写入备份区。
-3. `DFU_END` 携带大小和 CRC，主应用校验 `APP_BACK`。
-4. 校验通过后主应用跳转到 `BOOTLOADER`。
-5. Bootloader 将 `APP_BACK` 整区复制到 `APP_MAIN`，成功后复位。
-
-## 5. 固件总体架构
-
-主应用是裸机实时控制架构，没有 RTOS。任务按中断优先级和执行频率分层：
+高频任务的控制路径：
 
 ```mermaid
 flowchart TD
-    Boot[Reset / main] --> Init[外设初始化<br/>RCU GPIO SPI ADC TIMER CAN NVIC WDG]
-    Init --> Config[读取用户参数和齿槽补偿表<br/>CRC 失败则加载默认值]
-    Config --> Modules[初始化 MCT FOC PWMC ENCODER CONTROLLER]
-    Modules --> Idle[进入 IDLE]
-
-    ADCIRQ[ADC 注入转换完成中断<br/>20 kHz] --> HF[MCT_high_frequency_task]
-    HF --> Encoder[ENCODER_loop]
-    HF --> Sample[采样 VBUS 和相电流]
-    HF --> StateRun{状态}
-    StateRun -->|RUN| Controller[CONTROLLER_loop]
-    StateRun -->|CALIBRATION| Calibration[CALIBRATION_loop]
-    StateRun -->|ANTICOGGING| Anticogging[ANTICOGGING_loop + CONTROLLER_loop]
-    Controller --> FOC[FOC_current]
-    FOC --> PWM[SVM 占空比写入 TIMER0]
-
-    T1IRQ[TIMER1 中断<br/>1 ms] --> Safety[MCT_safety_task]
-    Safety --> Watchdog[喂独立看门狗]
-
-    MainLoop[while(1)] --> LP[MCT_low_priority_task]
-    LP --> CanLoop[CAN_comm_loop]
-    LP --> Status[状态/错误上报]
+    ADC[ADC injected EOC 20 kHz] --> HF[MCT_high_frequency_task]
+    HF --> FSM[状态切换处理]
+    HF --> ENC[ENCODER_loop]
+    ENC --> POS[机械位置/速度/电角度]
+    HF --> SAMPLE[读取 VBUS 和两相电流]
+    SAMPLE --> STATE{当前状态}
+    STATE -->|RUN| CTRL[CONTROLLER_loop]
+    STATE -->|CALIBRATION| CAL[CALIBRATION_loop]
+    STATE -->|ANTICOGGING| ACG[ANTICOGGING_loop]
+    ACG --> CTRL
+    CTRL --> FOC[FOC_current]
+    CAL --> FOCV[FOC_voltage]
+    FOC --> PWM[TIMER0 duty]
+    FOCV --> PWM
 ```
 
-### 5.1 实时层级
-
-| 层级 | 触发源 | 频率 | 主要职责 |
-| --- | --- | --- | --- |
-| 高频控制层 | 相电流 ADC 注入转换完成中断 | 20 kHz | 编码器采样、相电流/母线电压采样、状态机切换、控制器、FOC、电流保护 |
-| 安全与节拍层 | `TIMER1_IRQHandler` | 1 kHz | 母线电压/温度保护、系统毫秒计数、喂狗 |
-| 低优先级层 | `main` 主循环 | 尽可能快 | CAN 心跳、CAN 错误处理、状态上报、低频 LED 状态 |
-
-## 6. 主应用启动流程
-
-`Firmware/Firmware_app/Source/main.c` 的启动顺序：
-
-1. 关闭中断，打开 ICache/DCache。
-2. 初始化时钟、GPIO、SPI0、相电流 ADC、VBUS ADC、TIMER0 PWM、TIMER1、引脚锁定、NVIC、独立看门狗。
-3. 从 Flash 读取 `UsrConfig`，CRC 失败时加载默认参数。
-4. 读取齿槽补偿表，CRC 成功则 `AnticoggingValid = true`，失败则创建默认零表。
-5. 按配置设置 CAN 节点 ID 和波特率。
-6. 初始化状态机、FOC、PWM/ADC、电角度编码器、控制器。
-7. 启用看门狗和中断。
-8. 等待母线电压稳定。
-9. 进行相电流零点偏置校准，失败则置 `selftest` 错误。
-10. 状态机切到 `IDLE`。
-11. 进入 `while(1)`，循环执行 `MCT_low_priority_task()`。
-
-## 7. 模块职责
-
-| 模块 | 文件 | 职责 |
-| --- | --- | --- |
-| 板级映射 | `board_gd32h759.h` | 引脚、外设、ADC/PWM/CAN/SPI 资源映射，左右电机通道选择 |
-| 主入口 | `main.c/.h` | 外设初始化、Flash 地址定义、看门狗、启动流程 |
-| 中断 | `gd32h7xx_it.c/.h` | Fault 处理、ADC 高频控制入口、1 ms 安全任务、CAN 接收入口 |
-| 状态机 | `mc_task.c/.h` | BOOT/IDLE/RUN/CALIBRATION/ANTICOGGING 状态管理、安全保护、任务调度 |
-| PWM/电流采样 | `pwm_curr.c/.h` | 20 kHz PWM、ADC 标定、相电流和母线电压换算、低侧导通/开关 PWM |
-| FOC | `foc.c/.h` | Clarke/Park、D/Q 电流 PI、逆 Park、SVM、占空比输出 |
-| 编码器 | `encoder.c/.h` | SPI 读取 14 bit 磁编码器、线性化、PLL 估算位置/速度/电角度 |
-| 控制器 | `controller.c/.h` | 电流爬升、速度爬升、位置滤波、梯形位置规划、速度环/位置环/限幅 |
-| 梯形轨迹 | `trapTraj.c/.h` | 位置 profile 的加速、匀速、减速轨迹规划和采样 |
-| CAN | `can.c/.h` | 11 bit ID 协议、命令解析、状态/参数/DFU/校准接口、心跳和错误处理 |
-| 参数配置 | `usr_config.c/.h` | 默认参数、Flash 读写、CRC 校验、齿槽补偿表保存 |
-| 校准 | `calibration.c/.h` | 电阻、电感、方向/极对数、编码器 offset/LUT 自动测量 |
-| 齿槽补偿 | `anticogging.c/.h` | 按位置扫描并生成 5000 点电流补偿表 |
-| DFU | `dfu.c/.h` | 主应用侧擦写备份区、CRC 校验、跳转 bootloader |
-| 堆管理 | `heap.c/.h` | 16 KB 静态堆，供校准数组和齿槽表动态分配 |
-| 工具函数 | `util.c/.h` | 快速 sin/cos、CRC32、坐标变换、SVM、字节序转换 |
-
-## 8. 状态机
+## 7. 状态机
 
 状态定义在 `mc_task.h`：
 
@@ -179,227 +145,220 @@ RUN/CALIBRATION/ANTICOGGING -> IDLE
 
 状态含义：
 
-- `BOOT_UP`：启动初期，等待系统完成初始化。
-- `IDLE`：空闲安全态，PWM 关闭或低侧预充，允许进入运行、校准和齿槽补偿。
-- `RUN`：常规闭环运行，执行控制器和 FOC。
-- `CALIBRATION`：执行电机和编码器自动校准。
-- `ANTICOGGING`：按一圈位置扫描齿槽转矩补偿表。
+| 状态 | 含义 |
+| --- | --- |
+| `BOOT_UP` | 启动阶段，只允许切到 `IDLE` |
+| `IDLE` | 安全空闲态，FOC/PWM 关闭或只做低边预充 |
+| `RUN` | 常规闭环运行，执行控制器和 FOC |
+| `CALIBRATION` | 自动测量电机参数、编码器方向、极对数、offset 和 128 点 LUT |
+| `ANTICOGGING` | 扫描一圈生成 5000 点齿槽补偿表 |
 
-状态进入 `RUN` 或 `ANTICOGGING` 需要：
+进入 `RUN` 和 `ANTICOGGING` 需要当前无错误且 `UsrConfig.calib_valid` 为真；进入 `CALIBRATION` 只要求当前无错误。由 `IDLE` 切入运行类状态时，代码先 `FOC_arm()`，再等待 `CHARGE_BOOT_CAP_MS = 10 ms` 对应的 PWM tick，用于驱动自举电容预充。
 
-- 当前无错误位。
-- `UsrConfig.calib_valid` 为真。
+低优先级任务检测到错误字变化时会关闭 FOC 并切回 `IDLE`。`selftest` 是 fatal 位，`MCT_reset_error()` 只清除非 fatal 错误。
 
-状态进入 `CALIBRATION` 需要：
+## 8. 控制链路
 
-- 当前无错误位。
+### 8.1 编码器
 
-任意运行状态出现过流、过压、欠压、过温或低优先级检测到错误变化时，会关闭 FOC/PWM 并回到 `IDLE`。
+当前默认编码器接口是 PWM 绝对值输入：
 
-## 9. 控制链路
+- `ENCODER_CPR = 32768`。
+- 捕获输入为 `PB8/TIMER3_CH2`。
+- `encoder_hw.c` 交替捕获上升/下降沿，得到高电平 tick 和周期 tick。
+- 只有周期落在 `1000..40000` tick 且高电平合理时才更新 raw 计数。
+- 周期锁定需要连续 3 个样本，周期容差为 25%。
+- 单步 raw 跳变超过 `CPR/16` 时丢弃，沿用上一次读数。
 
-### 9.1 数据路径
+`encoder.c` 对 raw 计数做方向处理、128 点 offset LUT 线性化、PLL 位置/速度估计，输出：
 
-```mermaid
-flowchart LR
-    CAN[CAN 目标指令] --> ControllerInput[Controller 输入缓冲]
-    Sync[SYNC 或非同步模式] --> ControllerInput
-    Encoder[磁编码器 SPI + PLL] --> Controller
-    ADC[相电流 ADC / VBUS ADC] --> FOC
-    ControllerInput --> Controller[位置/速度/电流控制器]
-    Controller --> Iq[目标 Iq]
-    Iq --> FOC[FOC D/Q 电流环]
-    FOC --> SVM[SVM]
-    SVM --> Timer[TIMER0 三相互补 PWM]
-    Timer --> Power[功率驱动级]
-```
+- `Encoder.pos`：多圈机械位置，单位转。
+- `Encoder.vel`：机械速度，单位转/秒。
+- `Encoder.phase`：电角度。
+- `Encoder.phase_vel`：电角速度。
 
-### 9.2 控制模式
+### 8.2 控制模式
 
 控制模式定义在 `controller.h`：
 
 | 模式 | 编号 | 行为 |
 | --- | --- | --- |
-| `CONTROL_MODE_CURRENT_RAMP` | 0 | 输入电流按 `current_ramp_rate` 斜坡变化，直接给出 `Iq` 目标 |
-| `CONTROL_MODE_VELOCITY_RAMP` | 1 | 输入速度按 `velocity_ramp_rate` 斜坡变化，速度环输出 `Iq` |
+| `CONTROL_MODE_CURRENT_RAMP` | 0 | 电流目标按 `current_ramp_rate` 斜坡变化 |
+| `CONTROL_MODE_VELOCITY_RAMP` | 1 | 速度目标按 `velocity_ramp_rate` 斜坡变化，再经速度环输出电流 |
 | `CONTROL_MODE_POSITION_FILTER` | 2 | 二阶位置滤波生成位置/速度/加速度目标 |
-| `CONTROL_MODE_POSITION_PROFILE` | 3 | 梯形轨迹规划生成位置/速度/加速度目标 |
+| `CONTROL_MODE_POSITION_PROFILE` | 3 | 梯形位置轨迹规划，使用 `trapTraj` |
 
-控制器最终都会调用：
+CAN 下发的目标先写入 `Controller.input_*_buffer`。当 `sync_target_enable = 0` 时命令立即同步；启用同步模式后必须收到 `SYNC` 才把 buffer 应用到控制器输入。
+
+### 8.3 FOC
+
+FOC 模块执行 Clarke/Park、D/Q 电流 PI、反 Park、SVM 和三相 duty 输出。常规闭环入口为：
 
 ```c
-FOC_current(0, iq_set, phase_meas, phase_vel_meas);
+FOC_current(0, iq_set, Encoder.phase, Encoder.phase_vel);
 ```
 
-其中 `Id` 固定为 0，`Iq` 经过速度环、齿槽补偿和电流限幅后进入 FOC。
+当前 `Id` 固定为 0，`Iq` 来自控制器速度/位置/电流链路，并可叠加齿槽补偿。FOC 输出通过 `MOTOR_HW_set_phase_duty()` 写到 `TIMER0` 三相比较寄存器。
 
-### 9.3 FOC 电流环
+## 9. 校准与齿槽补偿
 
-FOC 主要步骤：
+自动校准由 `CALIBRATION_loop()` 分步执行：
 
-1. 相电流 `i_a/i_b/i_c` 经过 Clarke 变换得到 `alpha/beta`。
-2. 使用编码器电角度做 Park 变换得到 `i_d/i_q`。
-3. D/Q 电流 PI 产生 `v_d/v_q`。
-4. 按母线电压归一化并进行电压矢量限幅。
-5. 用 `phase + phase_vel * CURRENT_MEASURE_PERIOD` 做相位前馈。
-6. 逆 Park 得到 `alpha/beta` 调制量。
-7. SVM 计算三相 duty，写入 TIMER0 比较寄存器。
+1. 注入 A 相电流，估算相电阻。
+2. 正负电压切换，按电流变化率估算相电感。
+3. 转动电角度，估算编码器方向和电机极对数。
+4. 顺/逆方向采样编码器误差。
+5. 计算平均 `encoder_offset` 和 128 点 `offset_lut`。
+6. 通过 CAN 分包上报 LUT，置 `calib_valid = true`，返回 `IDLE`。
 
-当前 PWM/电流环频率为 20 kHz，电流控制带宽默认 1000 Hz。
+校准临时数组大小按 30 极对数、每极对 128 点分配。开始校准时会释放齿槽补偿表内存，结束后再从 Flash 重新加载或建立默认表。
 
-## 10. 编码器与校准
+齿槽补偿由 `ANTICOGGING_loop()` 生成：
 
-### 10.1 编码器
+- 表长度 `COGGING_MAP_NUM = 5000`。
+- 先顺时针移动并记录 `Foc.i_q_filt * 5000`。
+- 再逆时针移动并与原表取平均。
+- 完成后发送 step 5000 的报告，置 `AnticoggingValid = true` 并回到 `IDLE`。
+- 保存到 Flash 时由 `USR_CONFIG_save_cogging_map()` 写入 `COGGING_MAP` 区。
 
-编码器参数：
+## 10. 用户配置
 
-- 分辨率：`ENCODER_CPR = 16384`，14 bit
-- 通信：SPI0，命令读两个 8 bit 数据片段，组合后右移 2 位
-- 线性化：使用 `UsrConfig.offset_lut[128]` 做插值补偿
-- 速度估计：PLL，默认带宽约 100 Hz
-
-输出量：
-
-- `Encoder.pos`：多圈机械位置，单位为转
-- `Encoder.vel`：机械速度，单位为转/秒
-- `Encoder.phase`：电角度
-- `Encoder.phase_vel`：电角速度
-
-### 10.2 自动校准
-
-校准流程由 `CALIBRATION_loop()` 分步执行：
-
-1. `MOTOR_R`：沿 A 相注入电流，估计相电阻。
-2. `MOTOR_L`：正负电压切换，按电流变化率估计相电感。
-3. `DIR_PP`：旋转电角度，判断编码器方向并估计电机极对数。
-4. `ENCODER_CW/CCW`：顺/逆两个方向采样编码器误差。
-5. `ENCODER_END`：计算平均 offset 和 128 点 offset LUT。
-6. `REPORT_OFFSET_LUT`：通过 CAN 回报 LUT，设置 `calib_valid = true`，回到 `IDLE`。
-
-校准中会动态申请误差数组，最大按 30 极对数、每极对 128 点采样。
-
-### 10.3 齿槽补偿
-
-齿槽补偿由 `ANTICOGGING_loop()` 生成 `COGGING_MAP_NUM = 5000` 点表：
-
-- 先按顺时针方向移动并记录 `Foc.i_q_filt`。
-- 再按逆时针方向移动并与已有表取平均。
-- 每个位置点以 `int16_t` 保存，控制时按 `map[index] / 5000.0f` 叠加到 `Iq`。
-- 生成结束后 `AnticoggingValid = true` 并回到 `IDLE`。
-
-## 11. CAN 通信协议
-
-CAN 使用 11 bit 标准 ID：
-
-```text
-bit10      : echo 标记
-bit9..5    : node id，5 bit，1~31，0 表示广播
-bit4..0    : cmd id，5 bit
-```
-
-常用命令：
-
-| 命令 | ID | 说明 |
-| --- | --- | --- |
-| `SET_OP_MODE` | 0 | 设置控制模式 |
-| `MOTOR_ENABLE` / `MOTOR_DISABLE` | 1 / 2 | 进入 RUN 或 IDLE |
-| `SET_TORQUE` | 3 | 设置目标电流 |
-| `SET_VELOCITY` | 4 | 设置目标速度 |
-| `SET_POSITION` | 5 | 设置目标位置 |
-| `SYNC` | 6 | 同步应用输入缓冲 |
-| `CALIB_START` / `CALIB_ABORT` | 7 / 9 | 启动/中止自动校准 |
-| `ANTICOGGING_START` / `ANTICOGGING_ABORT` | 10 / 12 | 启动/中止齿槽补偿扫描 |
-| `SET_HOME` | 13 | 设置当前位置为零点 |
-| `ERROR_RESET` | 14 | 清除非致命错误 |
-| `GET_STATUSWORD` | 15 | 查询状态字 |
-| `GET_VALUE_1/2` | 17 / 18 | 读取电流、速度、位置、电压、功率、温度等运行量 |
-| `HEARTBEAT` | 23 | 心跳 |
-| `SET_CONFIG` / `GET_CONFIG` | 24 / 25 | 参数读写 |
-| `SAVE_ALL_CONFIG` / `RESET_ALL_CONFIG` | 26 / 27 | 参数保存/恢复默认 |
-| `GET_FW_VERSION` | 28 | 固件版本 |
-| `DFU_START` / `DFU_DATA` / `DFU_END` | 29 / 30 / 31 | 固件升级 |
-
-接收在 CAN 中断中完成，命令解析在 `CAN_receive_callback()` 的上下文中执行；心跳、发送超时和 CAN bus 错误检查在主循环低优先级任务中执行。
-
-## 12. 用户配置模型
-
-`UsrConfig` 包含以下配置域：
-
-- Motor：方向、极对数、相电阻/电感、电流/速度限制
-- Calibration：校准电流、电压
-- Controller：位置环、速度环、电流环带宽、默认模式、斜坡、profile 参数
-- Protect：欠压、过压、过流、驱动温度、NTC 温度阈值
-- CAN：节点 ID、波特率、心跳生产/消费时间
-- Encoder：校准有效标志、方向、offset、128 点 LUT
-- CRC：结构体尾部 CRC32
-
-默认参数在 `USR_CONFIG_set_default_config()` 中定义。配置写入 Flash 前计算 CRC，读取时 CRC 不匹配则认为配置无效并回退默认值。
-
-当前固件版本定义为：
+固件版本定义在 `usr_config.h`：
 
 ```text
 FW_VERSION_MAJOR = 3
 FW_VERSION_MINOR = 5
 ```
 
-## 13. Bootloader 架构
+`tUsrConfig` 中通过 CAN 开放的用户参数为前 33 个 32-bit 字段：
 
-Bootloader 位于 `Firmware/Firmware_boot/Source/main.c`，功能非常聚焦：
+| 类别 | 参数 |
+| --- | --- |
+| Motor | 方向、电机极对数、相电阻、相电感、电流限制、速度限制 |
+| Calibration | 校准电流、校准电压 |
+| Controller | 位置环、速度环、电流环带宽、默认控制模式、齿槽补偿开关、同步模式、到位窗口、斜坡和 profile 参数 |
+| Protect | 欠压、过压、过流、驱动过温、NTC 过温 |
+| CAN | 节点 ID、波特率、心跳消费超时、心跳生产周期 |
 
-1. 设置 `SCB->VTOR = BOOTLOADER_ADDR`。
-2. 最多重试 5 次：
-   - 擦除 `APP_MAIN`
-   - 将 `APP_BACK` 以 32 bit word 写入 `APP_MAIN`
-   - 写后逐字校验
-   - 成功后 `NVIC_SystemReset()`
-3. 如果持续失败，则停留在死循环并喂狗。
+编码器校准结果、128 点 LUT 和 CRC 是自动字段，不在普通 `GET_CONFIG/SET_CONFIG` 的 33 个用户参数范围内。默认参数由 `USR_CONFIG_set_default_config()` 建立，保存时计算 CRC32，读取时 CRC 不匹配则回退默认值。
 
-Bootloader 不解析通信协议，也不下载固件；它只负责把主应用已校验过的备份固件搬运到运行区。
+## 11. Flash 与 DFU
 
-## 14. 保护与错误处理
+Flash map 由 `board_port.h` 定义：
 
-错误位定义在 `tMCStatusword`：
+| 区域 | 地址 | 大小 | 用途 |
+| --- | --- | --- | --- |
+| `APP_MAIN` | `0x08000000` | `0x40000` / 256 KB | 主应用运行区 |
+| `APP_BACK` | `0x08040000` | `0x40000` / 256 KB | DFU 下载备份区 |
+| `BOOTLOADER` | `0x08080000` | `0x10000` / 64 KB | 搬运 Bootloader |
+| `USR_CONFIG` | `0x08090000` | `0x1000` / 4 KB | 用户参数，带 CRC |
+| `COGGING_MAP` | `0x08091000` | `0x4000` / 16 KB | 齿槽补偿表，带 CRC |
 
-- `over_voltage`
-- `under_voltage`
-- `over_current`
-- `drv_over_tmp`
-- `ntc_over_tmp`
-- `selftest`
+主应用侧 DFU 流程：
 
-保护来源：
+1. `DFU_START`：擦除 `APP_BACK`。
+2. `DFU_DATA`：按 CAN payload 写入备份区。
+3. `DFU_END`：校验接收字节数和 CRC32。
+4. 校验成功后回复 ACK，延时并跳转 `BOOTLOADER`。
 
-- 过流：高频任务中比较三相电流绝对值和 `protect_over_current`。
-- 过压/欠压：1 ms 安全任务中比较 `Foc.v_bus` 和阈值。
-- 温度：1 ms 安全任务中读取驱动温度/NTC 温度。当前 GD32H759 板级宏关闭温度 ADC，默认温度为 25 ℃。
-- 自检：启动后相电流 ADC 偏置不在阈值内时置位。
+Bootloader 位于 `Firmware/Firmware_boot/Source/main.c`。它不解析 CAN，也不下载固件，只负责最多重试 5 次：擦除 `APP_MAIN`、把整个 `APP_BACK` 256 KB 复制到 `APP_MAIN`、逐字校验，成功后系统复位。
 
-严重 fault handler 会调用 `Error_Handler()`，关闭 TIMER0 主 PWM 输出并停机。
+`flash_hw.c` 在主应用侧统一处理 GD32H7 Flash 擦写、写后校验和 DCache 失效，避免读取刚写入 Flash 时被缓存影响。
 
-## 15. 发布与外部资料
+## 12. CAN 协议
 
-`Firmware/Release` 中包含：
+固件使用 classic CAN，标准 11 bit ID：
 
-- `ctm_app_fw.bin`
-- `ctm_app_fw.hex`
-- `ctm_boot.bin`
-- `ctm_boot.hex`
+```text
+bit10   echo 标志
+bit9..5 节点 ID，1..31；节点 0 为广播接收
+bit4..0 命令 ID
+```
 
-`Hardware` 中包含：
+payload 固定按小端格式复制 C 侧 `int32_t`、`uint32_t` 和 `float`，单帧最大 8 字节。当前固件没有使用 CAN-FD 长 payload。
 
-- `ctm_rev3_0_schematic.pdf`
-- `ctm_rev3_0_3D.step`
-- `GD32H759xx Datasheet_Rev2.1.pdf`
-- `GD32H73x_75x_用户手册 _Rev1.8.pdf`
-- `GD32电控.pdf`
+| 命令 | ID | 说明 |
+| --- | --- | --- |
+| `SET_OP_MODE` | 0 | 设置控制模式 |
+| `MOTOR_ENABLE` / `MOTOR_DISABLE` | 1 / 2 | 进入 `RUN` 或回到 `IDLE` |
+| `SET_TORQUE` | 3 | 设置电流目标 |
+| `SET_VELOCITY` | 4 | 设置速度目标 |
+| `SET_POSITION` | 5 | 设置位置目标 |
+| `SYNC` | 6 | 同步应用目标 buffer |
+| `CALIB_START` / `CALIB_REPORT` / `CALIB_ABORT` | 7 / 8 / 9 | 自动校准控制和上报 |
+| `ANTICOGGING_START` / `ANTICOGGING_REPORT` / `ANTICOGGING_ABORT` | 10 / 11 / 12 | 齿槽补偿扫描控制和上报 |
+| `SET_HOME` | 13 | 当前位置置零 |
+| `ERROR_RESET` | 14 | 清除非 fatal 错误 |
+| `GET_STATUSWORD` / `STATUSWORD_REPORT` | 15 / 16 | 查询或上报状态字 |
+| `GET_VALUE_1` / `GET_VALUE_2` | 17 / 18 | 读取实时量 |
+| `HEARTBEAT` | 23 | 心跳 |
+| `SET_CONFIG` / `GET_CONFIG` | 24 / 25 | 写/读 33 个用户参数 |
+| `SAVE_ALL_CONFIG` / `RESET_ALL_CONFIG` | 26 / 27 | 保存全部参数/恢复默认 |
+| `GET_FW_VERSION` | 28 | 读取固件版本 |
+| `DFU_START` / `DFU_DATA` / `DFU_END` | 29 / 30 / 31 | 固件升级 |
 
-`ctm_tool` 中包含 Windows 64 位上位机 `ctm_tool_x64-1.7.exe`，README 展示了调试、校准、配置和 DFU 界面。
+`GET_VALUE_*` 当前索引含义：
 
-## 16. 关键架构注意点
+| 索引 | 返回值 |
+| --- | --- |
+| 0 | `Foc.i_q_filt`，受 `invert_motor_dir` 影响 |
+| 1 | `Encoder.vel`，受 `invert_motor_dir` 影响 |
+| 2 | `Encoder.pos`，受 `invert_motor_dir` 影响 |
+| 3 | `Foc.v_bus_filt` |
+| 4 | `Foc.i_bus_filt` |
+| 5 | `Foc.power_filt` |
+| 6 | 驱动温度 |
+| 7 | NTC 温度 |
 
-- 当前工程是裸机实时控制，所有控制闭环都在 ADC 中断里完成，新增逻辑应避免阻塞高频中断。
-- 主应用和 bootloader 的 Flash 地址相互依赖，修改 Keil IROM 或 Flash map 时必须同步更新 `main.h`、`Firmware_boot/Source/main.c` 和升级工具侧约定。
-- `COGGING_MAP` 使用动态堆分配，堆总大小只有 16 KB；新增动态内存使用要关注 `tCoggingMap` 和校准数组的峰值占用。
-- CAN payload 固定按 8 字节 classic CAN 处理，当前 `CAN-FD` 仅在 README 中说明为可扩展方向，固件实现没有使用 CAN-FD 大 payload。
-- `board_gd32h759.h` 同时描述左右两套电机驱动资源，但默认只选择左侧；硬件通道切换是编译期选择。
-- GD32H759 当前状态 LED API 是 no-op，依赖 LED 状态提示的调试方式在此板上不可用。
+关键命令会通过 RTT 打印收发日志；CAN bus 进入 passive 或 bus-off 时，低优先级任务会中止当前发送 mailbox 并重置接收 mailbox。
+
+## 13. 上位机
+
+当前上位机位于 `HostTool/`，不是旧 README 中的 `ctm_tool/`。它使用 Python 标准库 Tkinter 和 ZLG `ControlCAN.dll`，源码入口为：
+
+```powershell
+cd D:\Learing_Materials\ctm\HostTool
+python run_ctm_host.py
+```
+
+默认连接参数与固件默认配置一致：
+
+| 参数 | 默认值 |
+| --- | --- |
+| 设备类型 | `USBCAN-I` / `3` |
+| 设备号 | `0` |
+| 通道 | `0` |
+| CAN 波特率 | `500K` |
+| 节点 ID | `1` |
+
+已实现能力包括连接/断开 ZLG USB CAN、读取版本和状态、实时数据读取、控制模式切换、电机使能/失能、目标下发、同步目标、回零、清错、33 个用户参数读写、保存到 Flash、恢复默认、自动校准、齿槽补偿和 `.bin`/Intel HEX `.hex` DFU。
+
+## 14. 保护与错误
+
+状态字定义在 `mc_task.h`：
+
+| 错误位 | 来源 |
+| --- | --- |
+| `over_voltage` | 1 ms 安全任务比较 `Foc.v_bus` 与 `protect_over_voltage` |
+| `under_voltage` | 1 ms 安全任务比较 `Foc.v_bus` 与 `protect_under_voltage` |
+| `over_current` | 20 kHz 高频任务比较三相电流绝对值与 `protect_over_current` |
+| `drv_over_tmp` | 1 ms 安全任务读取驱动温度 |
+| `ntc_over_tmp` | 1 ms 安全任务读取 NTC 温度 |
+| `selftest` | 启动相电流偏置异常、校准失败等 fatal 自检错误 |
+
+当前 GD32H759 板级宏关闭温度 ADC，驱动温度和 NTC 温度默认返回 25 摄氏度。若后续接入温度采样，需要补齐 `BOARD_HAS_TEMP_ADC` 相关采样和 `adc_buff[1..2]` 更新路径。
+
+## 15. 调试与内存
+
+- RTT 默认开启：`CTM_ENABLE_RTT_SCOPE = 1`。
+- RTT 使用 XRAM3 `0x30004000..0x30007FFF`，`board_init.c` 先配置 MPU 非缓存，再开启 DCache。
+- RTT scope channel 1 每 20 个高频周期输出一次 6 个 float：`i_a/i_b/i_c/v_bus_filt/pos/vel`。
+- 动态堆大小为 16 KB，用于校准误差数组和齿槽补偿表。校准开始会释放齿槽表，避免与校准数组同时占用堆空间。
+
+## 16. 维护注意事项
+
+- 新增硬件相关代码优先放在 `board_*`、`*_hw.*` 或 `motor_hw` 门面下，业务层不要直接散落 GD32 寄存器细节。
+- 修改 Flash 布局时必须同步 `board_port.h`、Bootloader、DFU 上位机限制和 Keil IROM 范围。
+- 修改编码器类型时同步 `CTM_H759_ENCODER_INTERFACE`、GPIO/NVIC 初始化和 `ENCODER_CPR`。
+- 当前状态 LED 是空操作，不应把 LED 闪烁作为 GD32H759 板的唯一调试依据。
+- CAN payload 仍按 classic CAN 8 字节处理，上位机和固件都不要假设 CAN-FD 长帧可用。

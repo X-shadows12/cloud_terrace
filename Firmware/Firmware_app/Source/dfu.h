@@ -17,7 +17,7 @@
 #ifndef __DFU_H__
 #define __DFU_H__
 
-#include "main.h"
+#include "ctm_types.h"
 
 int  DFU_write_app_back_start(void);
 int  DFU_write_app_back(uint8_t *data, uint8_t num);

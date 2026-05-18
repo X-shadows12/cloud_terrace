@@ -17,8 +17,7 @@
 #ifndef __ANTICOGGING_H__
 #define __ANTICOGGING_H__
 
-#include "main.h"
-#include <stdbool.h>
+#include "ctm_types.h"
 
 extern bool AnticoggingValid;
 

@@ -17,7 +17,7 @@
 #ifndef __CALIBRATION_H__
 #define __CALIBRATION_H__
 
-#include "main.h"
+#include "ctm_types.h"
 
 void CALIBRATION_start(void);
 void CALIBRATION_end(void);

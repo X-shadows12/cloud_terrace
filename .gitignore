@@ -1,6 +1,7 @@
 # IDE settings
 .vscode/
 .codex/
+tmp_codex/
 __pycache__/
 *.py[cod]
 
@@ -19,6 +20,9 @@ Firmware/Release/
 *.axf
 *.bin
 *.hex
+
+# Hardware tool temporary/project exports
+Hardware/*.epro2
 
 # Host tool build outputs
 HostTool/build/

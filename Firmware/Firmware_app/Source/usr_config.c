@@ -14,6 +14,7 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "flash_hw.h"
 #include "usr_config.h"
 #include "controller.h"
 #include "heap.h"
@@ -22,25 +23,6 @@
 
 tUsrConfig   UsrConfig;
 tCoggingMap *pCoggingMap = NULL;
-
-#define DCACHE_LINE_SIZE 32U
-
-static void USR_CONFIG_invalidate_flash_cache(uint32_t addr, uint32_t size)
-{
-#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
-    if (size == 0U) {
-        return;
-    }
-
-    uint32_t start = addr & ~(DCACHE_LINE_SIZE - 1U);
-    uint32_t end   = (addr + size + DCACHE_LINE_SIZE - 1U) & ~(DCACHE_LINE_SIZE - 1U);
-
-    SCB_InvalidateDCache_by_Addr((uint32_t *) start, (int32_t) (end - start));
-#else
-    (void) addr;
-    (void) size;
-#endif
-}
 
 void USR_CONFIG_set_default_config(void)
 {
@@ -93,40 +75,14 @@ void USR_CONFIG_set_default_config(void)
 
 int USR_CONFIG_erease_config(void)
 {
-    uint32_t       addr;
-    fmc_state_enum status;
-
-    fmc_unlock();
-
-    // Erase
-    for (addr = USR_CONFIG_ADDR; addr < (USR_CONFIG_ADDR + USR_CONFIG_MAX_SIZE); addr += PAGE_SIZE) {
-        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGSERR);
-        status = fmc_sector_erase(addr);
-        if (status != FMC_READY) {
-            fmc_lock();
-            return -1;
-        }
-    }
-
-    fmc_lock();
-
-    USR_CONFIG_invalidate_flash_cache(USR_CONFIG_ADDR, USR_CONFIG_MAX_SIZE);
-
-    // Check
-    for (addr = USR_CONFIG_ADDR; addr < (USR_CONFIG_ADDR + USR_CONFIG_MAX_SIZE); addr += 4) {
-        if (0xFFFFFFFF != *((uint32_t *) addr)) {
-            return -2;
-        }
-    }
-
-    return 0;
+    return FLASH_HW_erase_region(FLASH_HW_USR_CONFIG_ADDR, FLASH_HW_USR_CONFIG_MAX_SIZE);
 }
 
 int USR_CONFIG_read_config(void)
 {
     int state = 0;
 
-    memcpy(&UsrConfig, (uint8_t *) USR_CONFIG_ADDR, sizeof(tUsrConfig));
+    memcpy(&UsrConfig, (uint8_t *) FLASH_HW_USR_CONFIG_ADDR, sizeof(tUsrConfig));
 
     uint32_t crc;
     crc = crc32((uint8_t *) &UsrConfig, sizeof(tUsrConfig) - 4);
@@ -144,22 +100,10 @@ int USR_CONFIG_save_config(void)
         return -1;
     }
 
-    fmc_unlock();
-
-    // Program
     UsrConfig.crc   = crc32((uint8_t *) &UsrConfig, sizeof(tUsrConfig) - 4);
-    uint32_t *pData = (uint32_t *) &UsrConfig;
-    for (int i = 0; i < sizeof(tUsrConfig) / 4; i++) {
-        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGSERR);
-        if (FMC_READY != fmc_word_program(USR_CONFIG_ADDR + i * 4, *(pData + i))) {
-            fmc_lock();
-            return -2;
-        }
+    if (FLASH_HW_program_words(FLASH_HW_USR_CONFIG_ADDR, (const uint32_t *) &UsrConfig, sizeof(tUsrConfig) / 4U)) {
+        return -2;
     }
-
-    fmc_lock();
-
-    USR_CONFIG_invalidate_flash_cache(USR_CONFIG_ADDR, USR_CONFIG_MAX_SIZE);
 
     return 0;
 }
@@ -177,33 +121,7 @@ void USR_CONFIG_set_default_cogging_map(void)
 
 int USR_CONFIG_erease_cogging_map(void)
 {
-    uint32_t       addr;
-    fmc_state_enum status;
-
-    fmc_unlock();
-
-    // Erase
-    for (addr = COGGING_MAP_ADDR; addr < (COGGING_MAP_ADDR + COGGING_MAP_MAX_SIZE); addr += PAGE_SIZE) {
-        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGSERR);
-        status = fmc_sector_erase(addr);
-        if (status != FMC_READY) {
-            fmc_lock();
-            return -1;
-        }
-    }
-
-    fmc_lock();
-
-    USR_CONFIG_invalidate_flash_cache(COGGING_MAP_ADDR, COGGING_MAP_MAX_SIZE);
-
-    // Check
-    for (addr = COGGING_MAP_ADDR; addr < (COGGING_MAP_ADDR + COGGING_MAP_MAX_SIZE); addr += 4) {
-        if (0xFFFFFFFF != *((uint32_t *) addr)) {
-            return -2;
-        }
-    }
-
-    return 0;
+    return FLASH_HW_erase_region(FLASH_HW_COGGING_MAP_ADDR, FLASH_HW_COGGING_MAP_MAX_SIZE);
 }
 
 int USR_CONFIG_read_cogging_map(void)
@@ -214,7 +132,7 @@ int USR_CONFIG_read_cogging_map(void)
         pCoggingMap = HEAP_malloc(sizeof(tCoggingMap));
     }
 
-    memcpy(pCoggingMap, (uint8_t *) COGGING_MAP_ADDR, sizeof(tCoggingMap));
+    memcpy(pCoggingMap, (uint8_t *) FLASH_HW_COGGING_MAP_ADDR, sizeof(tCoggingMap));
 
     uint32_t crc;
     crc = crc32((uint8_t *) pCoggingMap, sizeof(tCoggingMap) - 4);
@@ -232,22 +150,10 @@ int USR_CONFIG_save_cogging_map(void)
         return -1;
     }
 
-    fmc_unlock();
-
-    // Program
     pCoggingMap->crc = crc32((uint8_t *) pCoggingMap, sizeof(tCoggingMap) - 4);
-    uint32_t *pData  = (uint32_t *) pCoggingMap;
-    for (int i = 0; i < sizeof(tCoggingMap) / 4; i++) {
-        fmc_flag_clear(FMC_FLAG_END | FMC_FLAG_WPERR | FMC_FLAG_PGSERR);
-        if (FMC_READY != fmc_word_program(COGGING_MAP_ADDR + i * 4, *(pData + i))) {
-            fmc_lock();
-            return -2;
-        }
+    if (FLASH_HW_program_words(FLASH_HW_COGGING_MAP_ADDR, (const uint32_t *) pCoggingMap, sizeof(tCoggingMap) / 4U)) {
+        return -2;
     }
-
-    fmc_lock();
-
-    USR_CONFIG_invalidate_flash_cache(COGGING_MAP_ADDR, COGGING_MAP_MAX_SIZE);
 
     return 0;
 }

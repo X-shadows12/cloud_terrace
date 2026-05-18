@@ -15,7 +15,7 @@
 */
 
 #include "trapTraj.h"
-#include "pwm_curr.h"
+#include "motor_hw.h"
 #include "util.h"
 #include <math.h>
 

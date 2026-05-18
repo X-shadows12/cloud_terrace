@@ -20,7 +20,6 @@
 #include "foc.h"
 #include "heap.h"
 #include "mc_task.h"
-#include "pwm_curr.h"
 #include "usr_config.h"
 #include "util.h"
 

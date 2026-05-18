@@ -17,7 +17,7 @@
 #ifndef __CAN_H__
 #define __CAN_H__
 
-#include "main.h"
+#include "ctm_types.h"
 #include "mc_task.h"
 
 // CAN ID 11 bit high to low
@@ -73,7 +73,6 @@ typedef struct
 } CanFrame;
 
 void CAN_set_node_id(uint8_t nodeID);
-void CAN_hw_init(int baudrate);
 void CAN_comm_loop(void);
 void CAN_reset_rx_timeout(void);
 void CAN_reset_tx_timeout(void);

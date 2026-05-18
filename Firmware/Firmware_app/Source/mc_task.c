@@ -21,7 +21,10 @@
 #include "controller.h"
 #include "encoder.h"
 #include "foc.h"
-#include "pwm_curr.h"
+#include "motor_hw.h"
+#include "status_led.h"
+#include "rtt_scope.h"
+#include "runtime.h"
 #include "usr_config.h"
 #include "util.h"
 #include <math.h>
@@ -41,7 +44,7 @@ volatile tMCStatusword StatuswordOld;
 ;
 
 #define CHARGE_BOOT_CAP_MS    10
-#define CHARGE_BOOT_CAP_TICKS (uint16_t) ((PWM_FREQUENCY * CHARGE_BOOT_CAP_MS) / 1000)
+#define CHARGE_BOOT_CAP_TICKS (uint16_t) ((MOTOR_PWM_FREQUENCY_HZ * CHARGE_BOOT_CAP_MS) / 1000U)
 static uint16_t mChargeBootCapDelay = 0;
 
 static void enter_state(void);
@@ -236,10 +239,10 @@ void MCT_high_frequency_task(void)
 
     ENCODER_loop();
 
-    Foc.v_bus = read_vbus();
+    Foc.v_bus = MOTOR_HW_read_vbus_voltage();
     UTILS_LP_FAST(Foc.v_bus_filt, Foc.v_bus, 0.05f);
-    Foc.i_a = read_iphase_a();
-    Foc.i_b = read_iphase_b();
+    Foc.i_a = MOTOR_HW_read_phase_a_current();
+    Foc.i_b = MOTOR_HW_read_phase_b_current();
     Foc.i_c = -(Foc.i_a + Foc.i_b);
 
     if (++rtt_scope_div >= 20U) {
@@ -298,12 +301,12 @@ void MCT_safety_task(void)
         }
 
         // drv over tmp
-        if (read_drv_temp() > UsrConfig.protect_drv_over_tmp) {
+        if (MOTOR_HW_read_driver_temp() > UsrConfig.protect_drv_over_tmp) {
             StatuswordNew.errors.drv_over_tmp = 1;
         }
 
         // ntc over tmp
-        if (read_ntc_temp() > UsrConfig.protect_ntc_over_tmp) {
+        if (MOTOR_HW_read_ntc_temp() > UsrConfig.protect_ntc_over_tmp) {
             StatuswordNew.errors.ntc_over_tmp = 1;
         }
     }

@@ -17,10 +17,12 @@
 #ifndef __UTIL_H__
 #define __UTIL_H__
 
-#include "main.h"
+#include "ctm_types.h"
 #include <math.h>
 
+#ifndef M_PI
 #define M_PI                                          (3.14159265358f)
+#endif
 #define M_2PI                                         (6.28318530716f)
 #define ONE_BY_SQRT3                                  (0.57735026919f)
 #define TWO_BY_SQRT3                                  (2.0f * 0.57735026919f)
@@ -34,10 +36,10 @@
 #define FLOAT_EQU(floatA, floatB)                     ((ABS((floatA) - (floatB))) < 0.000001f)
 #define UTILS_LP_FAST(value, sample, filter_constant) (value -= (filter_constant) * ((value) - (sample)))
 
-extern inline void clarke_transform(float Ia, float Ib, float Ic, float *Ialpha, float *Ibeta);
-extern inline void park_transform(float Ialpha, float Ibeta, float Theta, float *Id, float *Iq);
-extern inline void inverse_park(float mod_d, float mod_q, float Theta, float *mod_alpha, float *mod_beta);
-extern inline int  svm(float alpha, float beta, float *duty_a, float *duty_b, float *duty_c);
+void clarke_transform(float Ia, float Ib, float Ic, float *Ialpha, float *Ibeta);
+void park_transform(float Ialpha, float Ibeta, float Theta, float *Id, float *Iq);
+void inverse_park(float mod_d, float mod_q, float Theta, float *mod_alpha, float *mod_beta);
+int  svm(float alpha, float beta, float *duty_a, float *duty_b, float *duty_c);
 
 float    sin_f32(float x);
 float    cos_f32(float x);

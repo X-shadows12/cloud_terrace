@@ -17,7 +17,7 @@
 #ifndef __MC_TASKS_H__
 #define __MC_TASKS_H__
 
-#include "main.h"
+#include "ctm_types.h"
 
 #if defined(__CC_ARM)
 #pragma anon_unions

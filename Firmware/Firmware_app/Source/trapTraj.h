@@ -17,8 +17,7 @@
 #ifndef _TRAP_TRAJ_H
 #define _TRAP_TRAJ_H
 
-#include "main.h"
-#include <stdbool.h>
+#include "ctm_types.h"
 
 typedef struct sTraj
 {

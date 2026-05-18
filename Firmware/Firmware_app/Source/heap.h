@@ -17,7 +17,7 @@
 #ifndef __HEAP_H__
 #define __HEAP_H__
 
-#include "main.h"
+#include "ctm_types.h"
 
 #define TOTAL_HEAP_SIZE ((size_t) (1024 * 16)) // byte
 

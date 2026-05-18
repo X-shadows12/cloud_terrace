@@ -17,7 +17,6 @@
 #ifndef __FOC_H__
 #define __FOC_H__
 
-#include "main.h"
 #include <stdbool.h>
 
 typedef struct sFOC

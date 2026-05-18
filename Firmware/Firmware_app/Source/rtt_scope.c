@@ -14,8 +14,9 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "main.h"
+#include "rtt_scope.h"
 #include "rtt_mem.h"
+#include <stdarg.h>
 
 #if CTM_ENABLE_RTT_SCOPE
 #include "SEGGER_RTT.h"
@@ -33,6 +34,15 @@ void RTT_init(void)
                               mRttScopeBuffer,
                               sizeof(mRttScopeBuffer),
                               SEGGER_RTT_MODE_NO_BLOCK_SKIP);
+}
+
+void RTT_log(const char *format, ...)
+{
+    va_list args;
+
+    va_start(args, format);
+    (void) SEGGER_RTT_vprintf(0U, format, &args);
+    va_end(args);
 }
 
 void RTT_scope_write_raw(const void *data, uint32_t size)
