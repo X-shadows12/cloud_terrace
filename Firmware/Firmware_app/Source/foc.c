@@ -40,7 +40,7 @@ void FOC_update_current_ctrl_gain(float bw)
 {
     float bandwidth         = bw * M_2PI;
     Foc.current_ctrl_p_gain = UsrConfig.motor_phase_inductance * bandwidth;
-    Foc.current_ctrl_i_gain = UsrConfig.motor_phase_resistance / UsrConfig.motor_phase_inductance;
+    Foc.current_ctrl_i_gain = UsrConfig.motor_phase_resistance * bandwidth;
 }
 
 void FOC_arm(void)
