@@ -255,12 +255,64 @@ class ScopePanel(tk.Frame):
         self.pause_btn.configure(text="▶" if self.paused else "||")
 
 
+class ScrollablePage(tk.Frame):
+    def __init__(self, parent) -> None:
+        super().__init__(parent, bg=PAGE_BG)
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        self.canvas = tk.Canvas(self, bg=PAGE_BG, bd=0, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.content = tk.Frame(self.canvas, bg=PAGE_BG)
+        self.window_id = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self.content.bind("<Configure>", self._on_content_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<Enter>", self._bind_mousewheel)
+        self.canvas.bind("<Leave>", self._unbind_mousewheel)
+
+    def _on_content_configure(self, _event=None) -> None:
+        self._sync_canvas_window()
+
+    def _on_canvas_configure(self, _event=None) -> None:
+        self._sync_canvas_window()
+
+    def _sync_canvas_window(self) -> None:
+        canvas_width = max(self.canvas.winfo_width(), 1)
+        canvas_height = max(self.canvas.winfo_height(), 1)
+        content_height = max(self.content.winfo_reqheight(), canvas_height)
+        self.canvas.itemconfigure(self.window_id, width=canvas_width, height=content_height)
+        self.canvas.configure(scrollregion=self.canvas.bbox(self.window_id))
+
+    def _bind_mousewheel(self, _event=None) -> None:
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_linux_mousewheel)
+        self.canvas.bind_all("<Button-5>", self._on_linux_mousewheel)
+
+    def _unbind_mousewheel(self, _event=None) -> None:
+        self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
+
+    def _on_mousewheel(self, event) -> str:
+        step = max(1, abs(event.delta) // 120)
+        self.canvas.yview_scroll(-step if event.delta > 0 else step, "units")
+        return "break"
+
+    def _on_linux_mousewheel(self, event) -> str:
+        self.canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
+        return "break"
+
+
 class CtmHostApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("ctm_tool")
-        self.geometry("1120x760")
-        self.minsize(1040, 680)
+        self._configure_window_size()
         self.configure(bg=OUTER_BG)
 
         self.bus: ZlgCanBus | None = None
@@ -271,6 +323,7 @@ class CtmHostApp(tk.Tk):
         self.value_vars: dict[int, tk.StringVar] = {}
         self.realtime_values: dict[str, float] = {}
         self.nav_buttons: dict[str, tk.Button] = {}
+        self.page_containers: dict[str, ScrollablePage] = {}
         self.pages: dict[str, tk.Frame] = {}
         self.tx_err_count = 0
         self.rx_err_count = 0
@@ -281,6 +334,7 @@ class CtmHostApp(tk.Tk):
         self.channel_var = tk.IntVar(value=0)
         self.bitrate_var = tk.StringVar(value="500K")
         self.node_id_var = tk.IntVar(value=1)
+        self.axis_var = tk.StringVar(value="Left")
         self.connection_state_var = tk.StringVar(value="disconnected")
         self.tx_err_var = tk.StringVar(value="0")
         self.rx_err_var = tk.StringVar(value="0")
@@ -289,6 +343,14 @@ class CtmHostApp(tk.Tk):
         self._build_layout()
         self.after(100, self._drain_worker_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _configure_window_size(self) -> None:
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        width = min(1120, max(900, screen_width - 80))
+        height = min(760, max(420, screen_height - 120))
+        self.geometry(f"{width}x{height}")
+        self.minsize(900, 420)
 
     def _build_style(self) -> None:
         style = ttk.Style()
@@ -329,9 +391,10 @@ class CtmHostApp(tk.Tk):
         self.page_stack.columnconfigure(0, weight=1)
 
         for name in ("debug", "calib", "config", "dfu", "about"):
-            page = tk.Frame(self.page_stack, bg=PAGE_BG)
-            page.grid(row=0, column=0, sticky="nsew")
-            self.pages[name] = page
+            page_container = ScrollablePage(self.page_stack)
+            page_container.grid(row=0, column=0, sticky="nsew")
+            self.page_containers[name] = page_container
+            self.pages[name] = page_container.content
 
         self._build_debug_page(self.pages["debug"])
         self._build_calib_page(self.pages["calib"])
@@ -379,7 +442,13 @@ class CtmHostApp(tk.Tk):
         conn = tk.Frame(topbar, bg=TOPBAR_BG)
         conn.pack(side=tk.RIGHT, padx=10)
         tk.Label(conn, text="节点ID：", bg=TOPBAR_BG, fg=TEXT_FG, font=(FONT_FAMILY, 10, "bold")).pack(side=tk.LEFT)
-        ttk.Spinbox(conn, from_=1, to=31, textvariable=self.node_id_var, width=5).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Spinbox(conn, from_=1, to=30, textvariable=self.node_id_var, width=5).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(conn, text="Axis:", bg=TOPBAR_BG, fg=TEXT_FG, font=(FONT_FAMILY, 10, "bold")).pack(side=tk.LEFT)
+        axis_combo = ttk.Combobox(conn, textvariable=self.axis_var, values=("Left", "Right", "Broadcast"), width=10, state="readonly")
+        axis_combo.pack(
+            side=tk.LEFT, padx=(0, 12)
+        )
+        axis_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_client_target())
         tk.Label(conn, text="波特率：", bg=TOPBAR_BG, fg=TEXT_FG, font=(FONT_FAMILY, 10, "bold")).pack(side=tk.LEFT)
         ttk.Combobox(conn, textvariable=self.bitrate_var, values=list(CAN_BAUDRATE_CONFIG_VALUES), width=8, state="readonly").pack(
             side=tk.LEFT, padx=(0, 12)
@@ -416,7 +485,8 @@ class CtmHostApp(tk.Tk):
         tk.Label(right, textvariable=self.rx_err_var, bg="#efefef", fg=TEXT_FG, font=(MONO_FAMILY, 10)).pack(side=tk.LEFT, padx=(6, 0))
 
     def _show_page(self, name: str) -> None:
-        self.pages[name].tkraise()
+        self.page_containers[name].tkraise()
+        self.page_containers[name].canvas.yview_moveto(0)
         for key, button in self.nav_buttons.items():
             is_active = key == name
             button.configure(
@@ -473,23 +543,20 @@ class CtmHostApp(tk.Tk):
 
         controls = tk.Frame(bottom, bg=PAGE_BG)
         controls.grid(row=0, column=1, sticky="ne")
-        self.mode_var = tk.StringVar(value=CONTROL_MODE_LABELS[ControlMode.POSITION_PROFILE])
-        tk.Label(controls, text="模式：", bg=PAGE_BG, fg=TEXT_FG).grid(row=0, column=0, sticky="e", pady=(0, 6))
-        ttk.Combobox(controls, textvariable=self.mode_var, values=list(CONTROL_MODE_LABELS.values()), width=16, state="readonly").grid(
-            row=0, column=1, sticky="ew", padx=(8, 8), pady=(0, 6)
-        )
-        self._flat_button(controls, "应用模式", self._apply_mode, width=10).grid(row=0, column=3, sticky="ew", padx=(0, 8), pady=(0, 6))
+        self.axis_control_vars: dict[str, dict[str, tk.Variable]] = {}
+        self._axis_control_panel(controls, "left", "左电机").grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        self._axis_control_panel(controls, "right", "右电机").grid(row=0, column=1, sticky="ew")
 
-        self.torque_var = tk.DoubleVar(value=0.0)
-        self.velocity_var = tk.DoubleVar(value=0.0)
-        self.position_var = tk.DoubleVar(value=0.0)
-        self._target_row(controls, 1, "转矩：", self.torque_var, "Nm", self._send_torque, "启动电机", lambda: self._call_client("enable"))
-        self._target_row(controls, 2, "速度：", self.velocity_var, "Turn/s", self._send_velocity, "停止电机", lambda: self._call_client("disable"))
-        self._target_row(controls, 3, "位置：", self.position_var, "Turn", self._send_position, "复位原点", lambda: self._call_client("set_home"))
-        self._flat_button(controls, "同步下发", lambda: self._call_client("sync"), width=10).grid(row=4, column=2, sticky="ew", pady=(8, 0))
+        dual = tk.Frame(controls, bg=PAGE_BG)
+        dual.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self._flat_button(dual, "左右使能", lambda: self._call_axes("enable"), width=10).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._flat_button(dual, "左右失能", lambda: self._call_axes("disable"), width=10, fg=RED).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0)
+        )
+        self._flat_button(dual, "左右同步", lambda: self._call_axes("sync"), width=10).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
 
         poll = tk.Frame(controls, bg=PAGE_BG)
-        poll.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        poll.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.poll_interval_var = tk.IntVar(value=200)
         tk.Label(poll, text="轮询周期 ms", bg=PAGE_BG, fg=TEXT_FG).pack(side=tk.LEFT)
         ttk.Spinbox(poll, from_=50, to=5000, increment=50, textvariable=self.poll_interval_var, width=7).pack(side=tk.LEFT, padx=(6, 6))
@@ -497,12 +564,52 @@ class CtmHostApp(tk.Tk):
         self.poll_btn.pack(side=tk.LEFT)
         self._flat_button(poll, "读取一次", self._read_once, width=9).pack(side=tk.LEFT, padx=(6, 0))
 
-    def _target_row(self, parent: tk.Frame, row: int, label: str, var: tk.DoubleVar, unit: str, command, action_text: str, action_command) -> None:
-        tk.Label(parent, text=label, bg=PAGE_BG, fg=TEXT_FG).grid(row=row, column=0, sticky="e", pady=4)
-        ttk.Entry(parent, textvariable=var, width=12).grid(row=row, column=1, sticky="ew", padx=(8, 4), pady=4)
-        tk.Label(parent, text=unit, bg=PAGE_BG, fg=TEXT_FG).grid(row=row, column=2, sticky="w", padx=(0, 8), pady=4)
-        self._flat_button(parent, "发送", command, width=7).grid(row=row, column=3, sticky="ew", padx=(0, 8), pady=4)
-        self._flat_button(parent, action_text, action_command, width=9).grid(row=row, column=4, sticky="ew", pady=4)
+    def _axis_control_panel(self, parent: tk.Frame, axis: str, title: str) -> tk.Frame:
+        panel = tk.Frame(parent, bg=PANEL_BG, bd=1, relief=tk.SOLID)
+        panel.columnconfigure(1, weight=1)
+        tk.Label(panel, text=title, bg=PANEL_BG, fg=TEXT_FG, font=(FONT_FAMILY, 10, "bold")).grid(
+            row=0, column=0, columnspan=4, sticky="w", padx=10, pady=(8, 4)
+        )
+        vars_for_axis: dict[str, tk.Variable] = {
+            "mode": tk.StringVar(value=CONTROL_MODE_LABELS[ControlMode.POSITION_PROFILE]),
+            "torque": tk.DoubleVar(value=0.0),
+            "velocity": tk.DoubleVar(value=0.0),
+            "position": tk.DoubleVar(value=0.0),
+        }
+        self.axis_control_vars[axis] = vars_for_axis
+
+        tk.Label(panel, text="模式：", bg=PANEL_BG, fg=TEXT_FG).grid(row=1, column=0, sticky="e", padx=(10, 0), pady=4)
+        ttk.Combobox(panel, textvariable=vars_for_axis["mode"], values=list(CONTROL_MODE_LABELS.values()), width=14, state="readonly").grid(
+            row=1, column=1, columnspan=2, sticky="ew", padx=(8, 4), pady=4
+        )
+        self._flat_button(panel, "应用", lambda axis=axis: self._apply_axis_mode(axis), width=6).grid(
+            row=1, column=3, sticky="ew", padx=(0, 8), pady=4
+        )
+        self._flat_button(panel, "使能", lambda axis=axis: self._call_axis(axis, "enable"), width=6).grid(
+            row=2, column=0, sticky="ew", padx=(10, 4), pady=4
+        )
+        self._flat_button(panel, "失能", lambda axis=axis: self._call_axis(axis, "disable"), width=6, fg=RED).grid(
+            row=2, column=1, sticky="ew", padx=4, pady=4
+        )
+        self._flat_button(panel, "清错", lambda axis=axis: self._call_axis(axis, "reset_error"), width=6).grid(
+            row=2, column=2, sticky="ew", padx=4, pady=4
+        )
+        self._flat_button(panel, "零点", lambda axis=axis: self._call_axis(axis, "set_home"), width=6).grid(
+            row=2, column=3, sticky="ew", padx=(4, 8), pady=4
+        )
+        self._target_row(panel, 3, "电流：", vars_for_axis["torque"], "A", lambda axis=axis: self._send_axis_torque(axis))
+        self._target_row(panel, 4, "速度：", vars_for_axis["velocity"], "Turn/s", lambda axis=axis: self._send_axis_velocity(axis))
+        self._target_row(panel, 5, "位置：", vars_for_axis["position"], "Turn", lambda axis=axis: self._send_axis_position(axis))
+        self._flat_button(panel, "同步", lambda axis=axis: self._call_axis(axis, "sync"), width=8).grid(
+            row=6, column=2, columnspan=2, sticky="ew", padx=(4, 8), pady=(6, 8)
+        )
+        return panel
+
+    def _target_row(self, parent: tk.Frame, row: int, label: str, var: tk.DoubleVar, unit: str, command) -> None:
+        tk.Label(parent, text=label, bg=PANEL_BG, fg=TEXT_FG).grid(row=row, column=0, sticky="e", padx=(10, 0), pady=4)
+        ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=1, sticky="ew", padx=(8, 4), pady=4)
+        tk.Label(parent, text=unit, bg=PANEL_BG, fg=TEXT_FG).grid(row=row, column=2, sticky="w", padx=(0, 4), pady=4)
+        self._flat_button(parent, "发送", command, width=6).grid(row=row, column=3, sticky="ew", padx=(0, 8), pady=4)
 
     def _build_calib_page(self, page: tk.Frame) -> None:
         page.columnconfigure(0, weight=1)
@@ -759,8 +866,14 @@ class CtmHostApp(tk.Tk):
     def _require_client(self) -> CtmClient:
         if self.client is None:
             raise CtmError("尚未连接")
-        self.client.set_node_id(self.node_id_var.get())
+        self._sync_client_target()
         return self.client
+
+    def _sync_client_target(self) -> None:
+        if self.client is None:
+            return
+        self.client.set_base_node_id(self.node_id_var.get())
+        self.client.set_target_axis(self.axis_var.get())
 
     def _call_client(self, method_name: str, *args) -> None:
         try:
@@ -773,36 +886,102 @@ class CtmHostApp(tk.Tk):
             self._log(f"{method_name} 失败：{exc}")
             messagebox.showerror("命令失败", str(exc))
 
-    def _apply_mode(self) -> None:
+    def _call_axis(self, axis: str, method_name: str, *args) -> None:
+        try:
+            client = self._require_client()
+            client.call_axis(axis, method_name, *args)
+            self._log(f"{self._axis_short(axis)} {method_name} 成功")
+        except Exception as exc:
+            self.tx_err_count += 1
+            self.tx_err_var.set(str(self.tx_err_count))
+            self._log(f"{self._axis_short(axis)} {method_name} 失败：{exc}")
+            messagebox.showerror("命令失败", str(exc))
+
+    def _call_axes(self, method_name: str, *args) -> None:
+        for axis in ("left", "right"):
+            self._call_axis(axis, method_name, *args)
+
+    def _apply_axis_mode(self, axis: str) -> None:
         reverse = {label: mode for mode, label in CONTROL_MODE_LABELS.items()}
-        self._call_client("set_op_mode", reverse[self.mode_var.get()])
+        self._call_axis(axis, "set_op_mode", reverse[str(self.axis_control_vars[axis]["mode"].get())])
 
-    def _send_torque(self) -> None:
-        self._call_client("set_torque", self.torque_var.get())
+    def _send_axis_torque(self, axis: str) -> None:
+        self._call_axis(axis, "set_torque", self.axis_control_vars[axis]["torque"].get())
 
-    def _send_velocity(self) -> None:
-        self._call_client("set_velocity", self.velocity_var.get())
+    def _send_axis_velocity(self, axis: str) -> None:
+        self._call_axis(axis, "set_velocity", self.axis_control_vars[axis]["velocity"].get())
 
-    def _send_position(self) -> None:
-        self._call_client("set_position", self.position_var.get())
+    def _send_axis_position(self, axis: str) -> None:
+        self._call_axis(axis, "set_position", self.axis_control_vars[axis]["position"].get())
+
+    def _selected_read_axes(self) -> tuple[str, ...]:
+        return ("left", "right")
+
+    @staticmethod
+    def _axis_short(axis: str) -> str:
+        return "R" if axis == "right" else "L"
 
     def _read_once(self) -> None:
         try:
             client = self._require_client()
-            status = client.get_statusword()
-            self.status_var.set(f"状态字：0x{status.status_code:02X} {' '.join(status.status) or '-'}")
-            self.error_var.set(f"错误字：0x{status.errors_code:02X} {' '.join(status.errors) or '-'}")
-            self.enabled_led.configure(fg=GREEN if "已使能" in status.status else "#bdbdbd")
-            self.target_led.configure(fg=GREEN if "目标到达" in status.status else "#bdbdbd")
-            major, minor = client.get_fw_version()
-            self.version_var.set(f"固件版本：{major}.{minor}")
+            axes = self._selected_read_axes()
+            statuses = {axis: client.get_axis_statusword(axis) for axis in axes}
 
+            self.status_var.set(
+                "Status: "
+                + " | ".join(
+                    f"{self._axis_short(axis)} 0x{statuses[axis].status_code:02X} "
+                    f"{' '.join(statuses[axis].status) or '-'}"
+                    for axis in axes
+                )
+            )
+            self.error_var.set(
+                "Error: "
+                + " | ".join(
+                    f"{self._axis_short(axis)} 0x{statuses[axis].errors_code:02X} "
+                    f"{' '.join(statuses[axis].errors) or '-'}"
+                    for axis in axes
+                )
+            )
+            self.enabled_led.configure(fg=GREEN if any(status.status_code & 0x01 for status in statuses.values()) else "#bdbdbd")
+            self.target_led.configure(fg=GREEN if all(status.status_code & 0x02 for status in statuses.values()) else "#bdbdbd")
+            major, minor = client.get_axis_fw_version(axes[0])
+            if len(axes) == 1:
+                self.version_var.set(f"FW: {major}.{minor}")
+            else:
+                versions = {axes[0]: (major, minor)}
+                for axis in axes[1:]:
+                    versions[axis] = client.get_axis_fw_version(axis)
+                self.version_var.set(
+                    "FW: "
+                    + " | ".join(
+                        f"{self._axis_short(axis)} {versions[axis][0]}.{versions[axis][1]}"
+                        for axis in axes
+                    )
+                )
+
+            values_by_axis: dict[str, dict[str, float]] = {}
             self.realtime_values.clear()
+            for axis in axes:
+                values_by_axis[axis] = {}
+                for item in VALUE_ITEMS:
+                    values_by_axis[axis][item.key] = client.get_axis_value(axis, item.index)
+
             for item in VALUE_ITEMS:
-                value = client.get_value(item.index)
-                self.realtime_values[item.key] = value
-                if item.index in self.value_vars:
-                    self.value_vars[item.index].set(f"{value:.5g}")
+                if len(axes) == 1:
+                    value = values_by_axis[axes[0]][item.key]
+                    self.realtime_values[item.key] = value
+                    if item.index in self.value_vars:
+                        self.value_vars[item.index].set(f"{value:.5g}")
+                else:
+                    self.realtime_values[item.key] = sum(values_by_axis[axis][item.key] for axis in axes) / len(axes)
+                    if item.index in self.value_vars:
+                        self.value_vars[item.index].set(
+                            " / ".join(
+                                f"{self._axis_short(axis)} {values_by_axis[axis][item.key]:.5g}"
+                                for axis in axes
+                            )
+                        )
             self.debug_scope_top.update_values(self.realtime_values)
             self.debug_scope_bottom.update_values(self.realtime_values)
         except Exception as exc:

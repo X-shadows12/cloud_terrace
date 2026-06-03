@@ -175,6 +175,7 @@ class CtmHostApp(tk.Tk):
         self.channel_var = tk.IntVar(value=0)
         self.bitrate_var = tk.StringVar(value="500K")
         self.node_id_var = tk.IntVar(value=1)
+        self.axis_var = tk.StringVar(value="Left")
         self.connection_state_var = tk.StringVar(value="未连接")
 
         bar.columnconfigure(0, weight=1)
@@ -211,7 +212,13 @@ class CtmHostApp(tk.Tk):
         )
 
         ttk.Label(form, text="节点").grid(row=1, column=3, sticky=tk.W, padx=(20, 0))
-        ttk.Spinbox(form, from_=1, to=31, textvariable=self.node_id_var, width=6).grid(row=1, column=4, sticky=tk.W, padx=(8, 12))
+        ttk.Spinbox(form, from_=1, to=30, textvariable=self.node_id_var, width=6).grid(row=1, column=4, sticky=tk.W, padx=(8, 8))
+        ttk.Label(form, text="Axis").grid(row=1, column=5, sticky=tk.W, padx=(8, 0))
+        axis_combo = ttk.Combobox(form, textvariable=self.axis_var, values=("Left", "Right", "Broadcast"), width=10, state="readonly")
+        axis_combo.grid(
+            row=1, column=6, sticky=tk.W, padx=(8, 12)
+        )
+        axis_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_client_target())
 
         self.connection_badge = tk.Label(
             form,
@@ -224,7 +231,7 @@ class CtmHostApp(tk.Tk):
             bd=0,
             highlightthickness=0,
         )
-        self.connection_badge.grid(row=1, column=5, columnspan=2, sticky=tk.W, padx=(8, 12))
+        self.connection_badge.grid(row=1, column=7, columnspan=2, sticky=tk.W, padx=(8, 12))
 
         action_bar = ttk.Frame(bar)
         action_bar.grid(row=0, column=1, rowspan=2, sticky="ne", padx=(16, 0))
@@ -271,44 +278,21 @@ class CtmHostApp(tk.Tk):
 
         controls = ttk.LabelFrame(right, text="电机控制", padding=12)
         controls.pack(fill=tk.X)
+        self.axis_control_vars: dict[str, dict[str, tk.Variable]] = {}
+        self._build_axis_control_panel(controls, "left", "左电机")
+        self._build_axis_control_panel(controls, "right", "右电机")
 
-        self.mode_var = tk.StringVar(value=CONTROL_MODE_LABELS[ControlMode.POSITION_PROFILE])
-        ttk.Label(controls, text="模式").grid(row=0, column=0, sticky=tk.W)
-        mode_combo = ttk.Combobox(
-            controls,
-            textvariable=self.mode_var,
-            values=list(CONTROL_MODE_LABELS.values()),
-            width=20,
-            state="readonly",
+        dual_actions = ttk.Frame(controls)
+        dual_actions.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(dual_actions, text="左右使能", style="Accent.TButton", command=lambda: self._call_axes("enable")).pack(
+            side=tk.LEFT, fill=tk.X, expand=True
         )
-        mode_combo.grid(row=0, column=1, sticky=tk.EW, padx=(8, 0), pady=2)
-        ttk.Button(controls, text="应用模式", style="Accent.TButton", command=self._apply_mode).grid(
-            row=1, column=0, columnspan=2, sticky=tk.EW, pady=(10, 2)
+        ttk.Button(dual_actions, text="左右失能", style="Danger.TButton", command=lambda: self._call_axes("disable")).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0)
         )
-
-        ttk.Button(controls, text="使能", style="Accent.TButton", command=lambda: self._call_client("enable")).grid(
-            row=2, column=0, sticky=tk.EW, pady=2
+        ttk.Button(controls, text="左右同步下发", style="Accent.TButton", command=lambda: self._call_axes("sync")).pack(
+            fill=tk.X, pady=(8, 0)
         )
-        ttk.Button(controls, text="失能", style="Danger.TButton", command=lambda: self._call_client("disable")).grid(
-            row=2, column=1, sticky=tk.EW, padx=(8, 0), pady=2
-        )
-        ttk.Button(controls, text="设为零点", style="Ghost.TButton", command=lambda: self._call_client("set_home")).grid(
-            row=3, column=0, sticky=tk.EW, pady=2
-        )
-        ttk.Button(controls, text="清除错误", style="Ghost.TButton", command=lambda: self._call_client("reset_error")).grid(
-            row=3, column=1, sticky=tk.EW, padx=(8, 0), pady=2
-        )
-
-        self.torque_var = tk.DoubleVar(value=0.0)
-        self.velocity_var = tk.DoubleVar(value=0.0)
-        self.position_var = tk.DoubleVar(value=0.0)
-        self._target_row(controls, 4, "目标电流 A", self.torque_var, self._send_torque)
-        self._target_row(controls, 5, "目标速度 r/s", self.velocity_var, self._send_velocity)
-        self._target_row(controls, 6, "目标位置 r", self.position_var, self._send_position)
-        ttk.Button(controls, text="同步下发", style="Accent.TButton", command=lambda: self._call_client("sync")).grid(
-            row=7, column=0, columnspan=2, sticky=tk.EW, pady=(10, 2)
-        )
-        controls.columnconfigure(1, weight=1)
 
         poll = ttk.LabelFrame(right, text="轮询", padding=12)
         poll.pack(fill=tk.X, pady=(12, 0))
@@ -327,10 +311,54 @@ class CtmHostApp(tk.Tk):
         self.poll_btn.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=2)
         poll.columnconfigure(1, weight=1)
 
+    def _build_axis_control_panel(self, parent: ttk.Frame, axis: str, title: str) -> None:
+        panel = ttk.LabelFrame(parent, text=title, padding=10)
+        panel.pack(fill=tk.X, pady=(0, 10))
+        vars_for_axis: dict[str, tk.Variable] = {
+            "mode": tk.StringVar(value=CONTROL_MODE_LABELS[ControlMode.POSITION_PROFILE]),
+            "torque": tk.DoubleVar(value=0.0),
+            "velocity": tk.DoubleVar(value=0.0),
+            "position": tk.DoubleVar(value=0.0),
+        }
+        self.axis_control_vars[axis] = vars_for_axis
+
+        ttk.Label(panel, text="模式").grid(row=0, column=0, sticky=tk.W)
+        ttk.Combobox(
+            panel,
+            textvariable=vars_for_axis["mode"],
+            values=list(CONTROL_MODE_LABELS.values()),
+            width=18,
+            state="readonly",
+        ).grid(row=0, column=1, sticky=tk.EW, padx=(8, 0), pady=2)
+        ttk.Button(panel, text="应用", style="Accent.TButton", command=lambda axis=axis: self._apply_axis_mode(axis)).grid(
+            row=0, column=2, sticky=tk.EW, padx=(6, 0), pady=2
+        )
+
+        ttk.Button(panel, text="使能", style="Accent.TButton", command=lambda axis=axis: self._call_axis(axis, "enable")).grid(
+            row=1, column=0, sticky=tk.EW, pady=(8, 2)
+        )
+        ttk.Button(panel, text="失能", style="Danger.TButton", command=lambda axis=axis: self._call_axis(axis, "disable")).grid(
+            row=1, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 2)
+        )
+        ttk.Button(panel, text="清错", style="Ghost.TButton", command=lambda axis=axis: self._call_axis(axis, "reset_error")).grid(
+            row=1, column=2, sticky=tk.EW, padx=(6, 0), pady=(8, 2)
+        )
+
+        self._target_row(panel, 2, "电流 A", vars_for_axis["torque"], lambda axis=axis: self._send_axis_torque(axis))
+        self._target_row(panel, 3, "速度 r/s", vars_for_axis["velocity"], lambda axis=axis: self._send_axis_velocity(axis))
+        self._target_row(panel, 4, "位置 r", vars_for_axis["position"], lambda axis=axis: self._send_axis_position(axis))
+        ttk.Button(panel, text="设为零点", style="Ghost.TButton", command=lambda axis=axis: self._call_axis(axis, "set_home")).grid(
+            row=5, column=0, columnspan=2, sticky=tk.EW, pady=(8, 0)
+        )
+        ttk.Button(panel, text="同步", style="Accent.TButton", command=lambda axis=axis: self._call_axis(axis, "sync")).grid(
+            row=5, column=2, sticky=tk.EW, padx=(6, 0), pady=(8, 0)
+        )
+        panel.columnconfigure(1, weight=1)
+
     def _target_row(self, parent: ttk.Frame, row: int, label: str, var: tk.DoubleVar, command) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, pady=(8, 2))
         frame = ttk.Frame(parent)
-        frame.grid(row=row, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 2))
+        frame.grid(row=row, column=1, columnspan=2, sticky=tk.EW, padx=(8, 0), pady=(8, 2))
         ttk.Entry(frame, textvariable=var, width=10).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(frame, text="发送", style="Accent.TButton", command=command).pack(side=tk.LEFT, padx=(6, 0))
 
@@ -551,8 +579,14 @@ class CtmHostApp(tk.Tk):
     def _require_client(self) -> CtmClient:
         if self.client is None:
             raise CtmError("尚未连接")
-        self.client.set_node_id(self.node_id_var.get())
+        self._sync_client_target()
         return self.client
+
+    def _sync_client_target(self) -> None:
+        if self.client is None:
+            return
+        self.client.set_base_node_id(self.node_id_var.get())
+        self.client.set_target_axis(self.axis_var.get())
 
     def _call_client(self, method_name: str, *args) -> None:
         try:
@@ -563,30 +597,92 @@ class CtmHostApp(tk.Tk):
             self._log(f"{method_name} 失败：{exc}")
             messagebox.showerror("命令失败", str(exc))
 
-    def _apply_mode(self) -> None:
+    def _call_axis(self, axis: str, method_name: str, *args) -> None:
+        try:
+            client = self._require_client()
+            client.call_axis(axis, method_name, *args)
+            self._log(f"{self._axis_short(axis)} {method_name} 成功")
+        except Exception as exc:
+            self._log(f"{self._axis_short(axis)} {method_name} 失败：{exc}")
+            messagebox.showerror("命令失败", str(exc))
+
+    def _call_axes(self, method_name: str, *args) -> None:
+        for axis in ("left", "right"):
+            self._call_axis(axis, method_name, *args)
+
+    def _apply_axis_mode(self, axis: str) -> None:
         reverse = {label: mode for mode, label in CONTROL_MODE_LABELS.items()}
-        self._call_client("set_op_mode", reverse[self.mode_var.get()])
+        self._call_axis(axis, "set_op_mode", reverse[str(self.axis_control_vars[axis]["mode"].get())])
 
-    def _send_torque(self) -> None:
-        self._call_client("set_torque", self.torque_var.get())
+    def _send_axis_torque(self, axis: str) -> None:
+        self._call_axis(axis, "set_torque", self.axis_control_vars[axis]["torque"].get())
 
-    def _send_velocity(self) -> None:
-        self._call_client("set_velocity", self.velocity_var.get())
+    def _send_axis_velocity(self, axis: str) -> None:
+        self._call_axis(axis, "set_velocity", self.axis_control_vars[axis]["velocity"].get())
 
-    def _send_position(self) -> None:
-        self._call_client("set_position", self.position_var.get())
+    def _send_axis_position(self, axis: str) -> None:
+        self._call_axis(axis, "set_position", self.axis_control_vars[axis]["position"].get())
+
+    def _selected_read_axes(self) -> tuple[str, ...]:
+        return ("left", "right")
+
+    @staticmethod
+    def _axis_short(axis: str) -> str:
+        return "R" if axis == "right" else "L"
 
     def _read_once(self) -> None:
         try:
             client = self._require_client()
-            status = client.get_statusword()
-            self.status_var.set(f"状态字：0x{status.status_code:02X} {' '.join(status.status) or '-'}")
-            self.error_var.set(f"错误字：0x{status.errors_code:02X} {' '.join(status.errors) or '-'}")
-            major, minor = client.get_fw_version()
-            self.version_var.set(f"固件版本：{major}.{minor}")
+            axes = self._selected_read_axes()
+            statuses = {axis: client.get_axis_statusword(axis) for axis in axes}
+
+            self.status_var.set(
+                "Status: "
+                + " | ".join(
+                    f"{self._axis_short(axis)} 0x{statuses[axis].status_code:02X} "
+                    f"{' '.join(statuses[axis].status) or '-'}"
+                    for axis in axes
+                )
+            )
+            self.error_var.set(
+                "Error: "
+                + " | ".join(
+                    f"{self._axis_short(axis)} 0x{statuses[axis].errors_code:02X} "
+                    f"{' '.join(statuses[axis].errors) or '-'}"
+                    for axis in axes
+                )
+            )
+            major, minor = client.get_axis_fw_version(axes[0])
+            if len(axes) == 1:
+                self.version_var.set(f"FW: {major}.{minor}")
+            else:
+                versions = {axes[0]: (major, minor)}
+                for axis in axes[1:]:
+                    versions[axis] = client.get_axis_fw_version(axis)
+                self.version_var.set(
+                    "FW: "
+                    + " | ".join(
+                        f"{self._axis_short(axis)} {versions[axis][0]}.{versions[axis][1]}"
+                        for axis in axes
+                    )
+                )
+
+            values_by_axis: dict[str, dict[int, float]] = {}
+            for axis in axes:
+                values_by_axis[axis] = {}
+                for item in VALUE_ITEMS:
+                    values_by_axis[axis][item.index] = client.get_axis_value(axis, item.index)
+
             for item in VALUE_ITEMS:
-                value = client.get_value(item.index)
-                self.value_vars[item.index].set(f"{value:.5g}")
+                if len(axes) == 1:
+                    self.value_vars[item.index].set(f"{values_by_axis[axes[0]][item.index]:.5g}")
+                else:
+                    self.value_vars[item.index].set(
+                        " / ".join(
+                            f"{self._axis_short(axis)} {values_by_axis[axis][item.index]:.5g}"
+                            for axis in axes
+                        )
+                    )
         except Exception as exc:
             self._log(f"读取失败：{exc}")
             messagebox.showerror("读取失败", str(exc))

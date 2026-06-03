@@ -17,62 +17,55 @@
 #include "encoder_hw.h"
 #include "encoder.h"
 #include "board_port.h"
-#include "runtime.h"
 #include "usr_config.h"
 #include "util.h"
 
 #if (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_PWM)
-#include "rtt_scope.h"
-#define ENCODER_LOG(format, ...) DEBUG(format, ##__VA_ARGS__)
-#else
-#define ENCODER_LOG(format, ...)
-#endif
+typedef struct {
+    volatile uint16_t rise_capture;
+    volatile uint16_t high_ticks;
+    volatile uint16_t period_ticks;
+    volatile uint16_t locked_period;
+    volatile uint16_t pending_high_ticks;
+    volatile uint8_t  have_rise;
+    volatile uint8_t  high_ready;
+    volatile uint8_t  sample_valid;
+    volatile uint8_t  lock_samples;
+    volatile uint8_t  wait_falling;
+    int32_t           raw_prev;
+    uint8_t           raw_prev_valid;
+} encoder_pwm_state_t;
 
-#if (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_PWM)
-static volatile uint16_t mPwmRiseCapture = 0U;
-static volatile uint16_t mPwmHighTicks    = 0U;
-static volatile uint16_t mPwmPeriodTicks  = 0U;
-static volatile uint16_t mPwmPendingHighTicks = 0U;
-static volatile uint16_t mPwmLastCapture  = 0U;
-static volatile uint16_t mPwmLockedPeriod = 0U;
-static volatile uint8_t  mPwmHaveRise     = 0U;
-static volatile uint8_t  mPwmHighReady    = 0U;
-static volatile uint8_t  mPwmSampleValid  = 0U;
-static volatile uint8_t  mPwmLockSamples  = 0U;
-static volatile uint8_t  mPwmWaitFalling  = 0U;
-static int32_t           mPwmRawPrev      = 0;
-static uint8_t           mPwmRawPrevValid = 0U;
+#define ENCODER_PWM_AXIS_COUNT 2U
+
+static encoder_pwm_state_t mPwmState[ENCODER_PWM_AXIS_COUNT];
 
 static uint16_t encoder_pwm_timer_prescaler(void);
-static void     encoder_pwm_capture_set_polarity(uint16_t polarity);
+static void     encoder_pwm_state_reset(motor_hw_axis_t axis);
+static void     encoder_pwm_capture_config_axis(motor_hw_axis_t axis,
+                                                uint16_t channel,
+                                                uint16_t polarity,
+                                                uint16_t selection,
+                                                uint16_t filter);
 static bool     encoder_pwm_period_in_range(uint16_t period_ticks);
 static bool     encoder_pwm_period_close(uint16_t period_ticks, uint16_t reference_ticks);
 static int32_t  encoder_count_delta(int32_t a, int32_t b);
-static int32_t  encoder_pwm_read(void);
+static int32_t  encoder_pwm_read(motor_hw_axis_t axis, int fallback_raw, uint8_t update_legacy_status);
+static uint8_t  encoder_pwm_axis_index(motor_hw_axis_t axis);
 #elif (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_SPI)
 static inline void delay_100ns(void);
 static uint16_t    encoder_spi_transfer16(uint16_t tx_data);
 #endif
 
+static motor_hw_axis_t encoder_hw_active_axis(void);
+
 void ENCODER_hw_init(void)
 {
 #if (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_PWM)
     timer_parameter_struct timer_initpara;
-    timer_ic_parameter_struct icpara;
 
-    mPwmRiseCapture = 0U;
-    mPwmHighTicks   = 0U;
-    mPwmPeriodTicks = 0U;
-    mPwmPendingHighTicks = 0U;
-    mPwmLastCapture  = 0U;
-    mPwmLockedPeriod = 0U;
-    mPwmHaveRise    = 0U;
-    mPwmHighReady   = 0U;
-    mPwmSampleValid = 0U;
-    mPwmLockSamples = 0U;
-    mPwmWaitFalling = 0U;
-    mPwmRawPrev     = 0;
-    mPwmRawPrevValid = 0U;
+    encoder_pwm_state_reset(MOTOR_HW_AXIS_LEFT);
+    encoder_pwm_state_reset(MOTOR_HW_AXIS_RIGHT);
 
     timer_deinit(BOARD_ENC_PWM_TIMER);
     timer_struct_para_init(&timer_initpara);
@@ -84,94 +77,108 @@ void ENCODER_hw_init(void)
     timer_initpara.repetitioncounter = 0U;
     timer_init(BOARD_ENC_PWM_TIMER, &timer_initpara);
 
-    timer_channel_input_struct_para_init(&icpara);
-    icpara.icpolarity   = TIMER_IC_POLARITY_RISING;
-    icpara.icselection  = TIMER_IC_SELECTION_DIRECTTI;
-    icpara.icprescaler  = TIMER_IC_PSC_DIV1;
-    icpara.icfilter     = BOARD_ENC_PWM_INPUT_FILTER;
-    timer_input_capture_config(BOARD_ENC_PWM_TIMER, BOARD_ENC_PWM_TIMER_CH, &icpara);
+    encoder_pwm_capture_config_axis(MOTOR_HW_AXIS_LEFT,
+                                    BOARD_LEFT_ENC_PWM_TIMER_CH,
+                                    TIMER_IC_POLARITY_BOTH_EDGE,
+                                    TIMER_IC_SELECTION_DIRECTTI,
+                                    BOARD_ENC_PWM_INPUT_FILTER);
+    encoder_pwm_capture_config_axis(MOTOR_HW_AXIS_RIGHT,
+                                    BOARD_RIGHT_ENC_PWM_TIMER_CH,
+                                    TIMER_IC_POLARITY_BOTH_EDGE,
+                                    TIMER_IC_SELECTION_DIRECTTI,
+                                    BOARD_ENC_PWM_INPUT_FILTER);
 
-    timer_interrupt_flag_clear(BOARD_ENC_PWM_TIMER, BOARD_ENC_PWM_TIMER_FLAG);
-    timer_flag_clear(BOARD_ENC_PWM_TIMER, TIMER_FLAG_CH2O);
-    timer_interrupt_enable(BOARD_ENC_PWM_TIMER, BOARD_ENC_PWM_TIMER_INT);
+    timer_interrupt_flag_clear(BOARD_ENC_PWM_TIMER, BOARD_LEFT_ENC_PWM_TIMER_FLAG);
+    timer_interrupt_flag_clear(BOARD_ENC_PWM_TIMER, BOARD_RIGHT_ENC_PWM_TIMER_FLAG);
+    timer_flag_clear(BOARD_ENC_PWM_TIMER, BOARD_LEFT_ENC_PWM_TIMER_OV_FLAG);
+    timer_flag_clear(BOARD_ENC_PWM_TIMER, BOARD_RIGHT_ENC_PWM_TIMER_OV_FLAG);
+    timer_interrupt_enable(BOARD_ENC_PWM_TIMER, BOARD_LEFT_ENC_PWM_TIMER_INT);
+    timer_interrupt_enable(BOARD_ENC_PWM_TIMER, BOARD_RIGHT_ENC_PWM_TIMER_INT);
     timer_enable(BOARD_ENC_PWM_TIMER);
 #endif
 }
 
 #if (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_PWM)
-void ENCODER_pwm_capture_callback(uint16_t capture)
+void ENCODER_pwm_capture_callback(motor_hw_axis_t axis, uint16_t capture, uint8_t signal_high)
 {
-    /* Alternate the capture polarity explicitly; GPIO level after the ISR starts
-       is not a reliable record of which edge filled the capture register. */
-    if (0U != mPwmHaveRise) {
-        uint16_t edge_ticks = (uint16_t)(capture - mPwmLastCapture);
+    encoder_pwm_state_t *pwm = &mPwmState[encoder_pwm_axis_index(axis)];
 
-        if (edge_ticks < BOARD_ENC_PWM_MIN_HIGH_TICKS) {
-            return;
+    if (0U == pwm->have_rise) {
+        if (0U != signal_high) {
+            ENCODER_pwm_capture_rise_callback(axis, capture);
         }
+        return;
     }
-    mPwmLastCapture = capture;
 
-    if (0U != mPwmWaitFalling) {
-        if (0U != mPwmHaveRise) {
-            uint16_t high_ticks = (uint16_t)(capture - mPwmRiseCapture);
-
-            if ((high_ticks >= BOARD_ENC_PWM_MIN_HIGH_TICKS)
-                && (high_ticks < BOARD_ENC_PWM_MAX_PERIOD_TICKS)) {
-                mPwmPendingHighTicks = high_ticks;
-                mPwmHighReady        = 1U;
-            } else {
-                mPwmHighReady        = 0U;
-                mPwmPendingHighTicks = 0U;
-            }
-        }
-
-        mPwmWaitFalling = 0U;
-        encoder_pwm_capture_set_polarity(TIMER_IC_POLARITY_RISING);
+    if (0U != pwm->wait_falling) {
+        ENCODER_pwm_capture_fall_callback(axis, capture);
     } else {
-        if ((0U != mPwmHaveRise) && (0U != mPwmHighReady)) {
-            uint16_t period_ticks = (uint16_t)(capture - mPwmRiseCapture);
-
-            if (encoder_pwm_period_in_range(period_ticks)
-                && ((0U == mPwmLockedPeriod) || encoder_pwm_period_close(period_ticks, mPwmLockedPeriod))
-                && (mPwmPendingHighTicks < period_ticks)) {
-                mPwmHighTicks   = mPwmPendingHighTicks;
-                mPwmPeriodTicks = period_ticks;
-                mPwmSampleValid = 1U;
-
-                if (mPwmLockSamples < BOARD_ENC_PWM_PERIOD_LOCK_SAMPLES) {
-                    mPwmLockSamples++;
-                    if (mPwmLockSamples >= BOARD_ENC_PWM_PERIOD_LOCK_SAMPLES) {
-                        mPwmLockedPeriod = period_ticks;
-                    }
-                } else {
-                    mPwmLockedPeriod = (uint16_t)(((uint32_t)mPwmLockedPeriod * 7U + (uint32_t)period_ticks) / 8U);
-                }
-            } else if (0U == mPwmSampleValid) {
-                mPwmLockSamples = 0U;
-                mPwmLockedPeriod = 0U;
-            }
-
-            mPwmHighReady = 0U;
-            mPwmPendingHighTicks = 0U;
-        }
-
-        mPwmRiseCapture = capture;
-        mPwmHaveRise    = 1U;
-        mPwmWaitFalling = 1U;
-        encoder_pwm_capture_set_polarity(TIMER_IC_POLARITY_FALLING);
+        ENCODER_pwm_capture_rise_callback(axis, capture);
     }
 }
 
-void ENCODER_pwm_capture_overrun_callback(void)
+void ENCODER_pwm_capture_rise_callback(motor_hw_axis_t axis, uint16_t capture)
 {
-    mPwmHighReady   = 0U;
-    mPwmHaveRise    = 0U;
-    mPwmPendingHighTicks = 0U;
-    mPwmWaitFalling = 0U;
-    mPwmLockSamples = 0U;
-    mPwmLockedPeriod = 0U;
-    encoder_pwm_capture_set_polarity(TIMER_IC_POLARITY_RISING);
+    encoder_pwm_state_t *pwm = &mPwmState[encoder_pwm_axis_index(axis)];
+
+    if ((0U != pwm->have_rise) && (0U != pwm->high_ready)) {
+        uint16_t period_ticks = (uint16_t)(capture - pwm->rise_capture);
+
+        if (encoder_pwm_period_in_range(period_ticks)
+            && ((0U == pwm->locked_period) || encoder_pwm_period_close(period_ticks, pwm->locked_period))
+            && (pwm->pending_high_ticks < period_ticks)) {
+            pwm->high_ticks   = pwm->pending_high_ticks;
+            pwm->period_ticks = period_ticks;
+            pwm->sample_valid = 1U;
+
+            if (pwm->lock_samples < BOARD_ENC_PWM_PERIOD_LOCK_SAMPLES) {
+                pwm->lock_samples++;
+                if (pwm->lock_samples >= BOARD_ENC_PWM_PERIOD_LOCK_SAMPLES) {
+                    pwm->locked_period = period_ticks;
+                }
+            } else {
+                pwm->locked_period = (uint16_t)(((uint32_t)pwm->locked_period * 7U + (uint32_t)period_ticks) / 8U);
+            }
+        } else if (0U == pwm->sample_valid) {
+            pwm->lock_samples  = 0U;
+            pwm->locked_period = 0U;
+        }
+    }
+
+    pwm->rise_capture      = capture;
+    pwm->have_rise         = 1U;
+    pwm->high_ready        = 0U;
+    pwm->pending_high_ticks = 0U;
+    pwm->wait_falling      = 1U;
+}
+
+void ENCODER_pwm_capture_fall_callback(motor_hw_axis_t axis, uint16_t capture)
+{
+    encoder_pwm_state_t *pwm = &mPwmState[encoder_pwm_axis_index(axis)];
+
+    if (0U != pwm->have_rise) {
+        uint16_t high_ticks = (uint16_t)(capture - pwm->rise_capture);
+
+        if ((high_ticks >= BOARD_ENC_PWM_MIN_HIGH_TICKS)
+            && (high_ticks < BOARD_ENC_PWM_MAX_PERIOD_TICKS)) {
+            pwm->pending_high_ticks = high_ticks;
+            pwm->high_ready         = 1U;
+        }
+    }
+
+    pwm->wait_falling = 0U;
+}
+
+void ENCODER_pwm_capture_overrun_callback(motor_hw_axis_t axis)
+{
+    encoder_pwm_state_t *pwm = &mPwmState[encoder_pwm_axis_index(axis)];
+
+    pwm->high_ready         = 0U;
+    pwm->have_rise          = 0U;
+    pwm->pending_high_ticks = 0U;
+    pwm->lock_samples       = 0U;
+    pwm->locked_period      = 0U;
+    pwm->wait_falling       = 0U;
 }
 
 static uint16_t encoder_pwm_timer_prescaler(void)
@@ -195,13 +202,39 @@ static uint16_t encoder_pwm_timer_prescaler(void)
     return (uint16_t)(ticks_per_us - 1U);
 }
 
-static void encoder_pwm_capture_set_polarity(uint16_t polarity)
+static void encoder_pwm_state_reset(motor_hw_axis_t axis)
 {
-    uint32_t ctl = TIMER_CHCTL2(BOARD_ENC_PWM_TIMER);
+    encoder_pwm_state_t *pwm = &mPwmState[encoder_pwm_axis_index(axis)];
 
-    ctl &= (~(uint32_t)(TIMER_CHCTL2_CH2P | TIMER_CHCTL2_MCH2P));
-    ctl |= ((uint32_t)polarity << 8U);
-    TIMER_CHCTL2(BOARD_ENC_PWM_TIMER) = ctl;
+    pwm->rise_capture      = 0U;
+    pwm->high_ticks        = 0U;
+    pwm->period_ticks      = 0U;
+    pwm->locked_period     = 0U;
+    pwm->pending_high_ticks = 0U;
+    pwm->have_rise         = 0U;
+    pwm->high_ready        = 0U;
+    pwm->sample_valid      = 0U;
+    pwm->lock_samples      = 0U;
+    pwm->wait_falling      = 0U;
+    pwm->raw_prev          = 0;
+    pwm->raw_prev_valid    = 0U;
+}
+
+static void encoder_pwm_capture_config_axis(motor_hw_axis_t axis,
+                                            uint16_t channel,
+                                            uint16_t polarity,
+                                            uint16_t selection,
+                                            uint16_t filter)
+{
+    timer_ic_parameter_struct icpara;
+
+    (void) axis;
+    timer_channel_input_struct_para_init(&icpara);
+    icpara.icpolarity  = polarity;
+    icpara.icselection = selection;
+    icpara.icprescaler = TIMER_IC_PSC_DIV1;
+    icpara.icfilter    = filter;
+    timer_input_capture_config(BOARD_ENC_PWM_TIMER, channel, &icpara);
 }
 
 static bool encoder_pwm_period_in_range(uint16_t period_ticks)
@@ -236,8 +269,9 @@ static int32_t encoder_count_delta(int32_t a, int32_t b)
     return delta;
 }
 
-static int32_t encoder_pwm_read(void)
+static int32_t encoder_pwm_read(motor_hw_axis_t axis, int fallback_raw, uint8_t update_legacy_status)
 {
+    encoder_pwm_state_t *pwm = &mPwmState[encoder_pwm_axis_index(axis)];
     uint32_t primask;
     uint16_t high_ticks;
     uint16_t period_ticks;
@@ -245,25 +279,27 @@ static int32_t encoder_pwm_read(void)
 
     primask = __get_PRIMASK();
     __disable_irq();
-    high_ticks   = mPwmHighTicks;
-    period_ticks = mPwmPeriodTicks;
-    valid        = mPwmSampleValid;
+    high_ticks   = pwm->high_ticks;
+    period_ticks = pwm->period_ticks;
+    valid        = pwm->sample_valid;
     __set_PRIMASK(primask);
 
-    Encoder.pwm_high_cycles   = high_ticks;
-    Encoder.pwm_period_cycles = period_ticks;
-    Encoder.pwm_valid         = valid;
+    if (0U != update_legacy_status) {
+        Encoder.pwm_high_cycles   = high_ticks;
+        Encoder.pwm_period_cycles = period_ticks;
+        Encoder.pwm_valid         = valid;
+    }
 
     if ((!valid) || (period_ticks == 0U)) {
-        return (0U != mPwmRawPrevValid) ? mPwmRawPrev : Encoder.raw;
+        return (0U != pwm->raw_prev_valid) ? pwm->raw_prev : fallback_raw;
     }
 
     if ((high_ticks <= BOARD_ENC_PWM_MIN_HIGH_TICKS) || (high_ticks >= period_ticks)) {
-        return (0U != mPwmRawPrevValid) ? mPwmRawPrev : Encoder.raw;
+        return (0U != pwm->raw_prev_valid) ? pwm->raw_prev : fallback_raw;
     }
 
     if ((period_ticks < BOARD_ENC_PWM_MIN_PERIOD_TICKS) || (period_ticks > BOARD_ENC_PWM_MAX_PERIOD_TICKS)) {
-        return (0U != mPwmRawPrevValid) ? mPwmRawPrev : Encoder.raw;
+        return (0U != pwm->raw_prev_valid) ? pwm->raw_prev : fallback_raw;
     }
 
     int32_t raw = (int32_t) (((uint64_t) high_ticks * (uint64_t) BOARD_ENC_PWM_CPR) / period_ticks);
@@ -272,35 +308,45 @@ static int32_t encoder_pwm_read(void)
         raw = (int32_t) BOARD_ENC_PWM_CPR - 1;
     }
 
-    if (0U != mPwmRawPrevValid) {
-        int32_t delta = encoder_count_delta(raw, mPwmRawPrev);
+    if (0U != pwm->raw_prev_valid) {
+        int32_t delta = encoder_count_delta(raw, pwm->raw_prev);
 
         if (ABS(delta) > (int32_t) BOARD_ENC_PWM_MAX_STEP_COUNTS) {
-            return mPwmRawPrev;
+            return pwm->raw_prev;
         }
     }
 
-    mPwmRawPrev      = raw;
-    mPwmRawPrevValid = 1U;
+    pwm->raw_prev       = raw;
+    pwm->raw_prev_valid = 1U;
 
     return raw;
 }
+
+static uint8_t encoder_pwm_axis_index(motor_hw_axis_t axis)
+{
+    return (axis == MOTOR_HW_AXIS_RIGHT) ? 1U : 0U;
+}
 #endif
+
+static motor_hw_axis_t encoder_hw_active_axis(void)
+{
+#if defined(BOARD_USE_RIGHT_MOTOR)
+    return MOTOR_HW_AXIS_RIGHT;
+#else
+    return MOTOR_HW_AXIS_LEFT;
+#endif
+}
 
 int32_t ENCODER_hw_read(void)
 {
-#if (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_PWM)
-    static uint32_t pwm_log_tick = 0U;
-    int32_t raw = encoder_pwm_read();
+    return ENCODER_hw_read_axis(encoder_hw_active_axis());
+}
 
-    if (get_ms_since(pwm_log_tick) > 1000U) {
-        pwm_log_tick = SystickCount;
-        ENCODER_LOG("[ENC] pwm valid=%u raw=%d high=%u period=%u\n",
-                    (unsigned) Encoder.pwm_valid,
-                    raw,
-                    (unsigned) Encoder.pwm_high_cycles,
-                    (unsigned) Encoder.pwm_period_cycles);
-    }
+int32_t ENCODER_hw_read_axis(motor_hw_axis_t axis)
+{
+#if (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_PWM)
+    uint8_t update_legacy_status = (axis == encoder_hw_active_axis()) ? 1U : 0U;
+    int32_t raw = encoder_pwm_read(axis, ENCODER_axis(axis)->raw, update_legacy_status);
 
     return raw;
 #elif (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_SPI)
@@ -329,6 +375,40 @@ int32_t ENCODER_hw_read(void)
     Encoder.pwm_period_cycles = 0U;
     Encoder.pwm_high_cycles   = 0U;
     return 0;
+#endif
+}
+
+void ENCODER_hw_get_axis_pwm_status(motor_hw_axis_t axis,
+                                    uint8_t *valid,
+                                    uint32_t *period_cycles,
+                                    uint32_t *high_cycles)
+{
+#if (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_PWM)
+    const encoder_pwm_state_t *pwm = &mPwmState[encoder_pwm_axis_index(axis)];
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    if (valid != NULL) {
+        *valid = pwm->sample_valid;
+    }
+    if (period_cycles != NULL) {
+        *period_cycles = pwm->period_ticks;
+    }
+    if (high_cycles != NULL) {
+        *high_cycles = pwm->high_ticks;
+    }
+    __set_PRIMASK(primask);
+#else
+    (void) axis;
+    if (valid != NULL) {
+        *valid = 1U;
+    }
+    if (period_cycles != NULL) {
+        *period_cycles = 0U;
+    }
+    if (high_cycles != NULL) {
+        *high_cycles = 0U;
+    }
 #endif
 }
 

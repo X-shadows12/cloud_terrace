@@ -50,5 +50,8 @@ extern tTraj Traj;
 
 void TRAJ_plan(float position, float start_position, float start_velocity, float Vmax, float Amax, float Dmax);
 void TRAJ_eval(void);
+void TRAJ_plan_axis(tTraj *traj, float position, float start_position, float start_velocity,
+                    float Vmax, float Amax, float Dmax);
+void TRAJ_eval_axis(tTraj *traj);
 
 #endif

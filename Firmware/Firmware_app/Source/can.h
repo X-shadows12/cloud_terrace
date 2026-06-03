@@ -80,6 +80,7 @@ void CAN_reset_tx_timeout(void);
 void CAN_receive_callback(void);
 
 void CAN_tx_statusword(tMCStatusword statusword);
+void CAN_tx_axis_statusword(motor_hw_axis_t axis, tMCStatusword statusword);
 
 // only used in one NVIC
 void CAN_calib_report(int32_t step, uint8_t *data);

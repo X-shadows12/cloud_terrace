@@ -33,6 +33,10 @@
 
 #define READ_IPHASE_A_ADC()    ((uint16_t) (ADC_IDATA0(BOARD_PHASE_ADC)))
 #define READ_IPHASE_B_ADC()    ((uint16_t) (ADC_IDATA1(BOARD_PHASE_ADC)))
+#define READ_LEFT_IPHASE_A_ADC()  ((uint16_t) (ADC_IDATA0(BOARD_LEFT_PHASE_ADC)))
+#define READ_LEFT_IPHASE_B_ADC()  ((uint16_t) (ADC_IDATA1(BOARD_LEFT_PHASE_ADC)))
+#define READ_RIGHT_IPHASE_A_ADC() ((uint16_t) (ADC_IDATA0(BOARD_RIGHT_PHASE_ADC)))
+#define READ_RIGHT_IPHASE_B_ADC() ((uint16_t) (ADC_IDATA1(BOARD_RIGHT_PHASE_ADC)))
 
 extern uint16_t adc_buff[3];
 extern int16_t  phase_a_adc_offset;
@@ -76,6 +80,36 @@ static inline void set_b_duty(uint32_t duty)
 static inline void set_c_duty(uint32_t duty)
 {
     BOARD_PWM_PHASE_C_CV = duty;
+}
+
+static inline void set_left_a_duty(uint32_t duty)
+{
+    BOARD_LEFT_PWM_PHASE_A_CV = duty;
+}
+
+static inline void set_left_b_duty(uint32_t duty)
+{
+    BOARD_LEFT_PWM_PHASE_B_CV = duty;
+}
+
+static inline void set_left_c_duty(uint32_t duty)
+{
+    BOARD_LEFT_PWM_PHASE_C_CV = duty;
+}
+
+static inline void set_right_a_duty(uint32_t duty)
+{
+    BOARD_RIGHT_PWM_PHASE_A_CV = duty;
+}
+
+static inline void set_right_b_duty(uint32_t duty)
+{
+    BOARD_RIGHT_PWM_PHASE_B_CV = duty;
+}
+
+static inline void set_right_c_duty(uint32_t duty)
+{
+    BOARD_RIGHT_PWM_PHASE_C_CV = duty;
 }
 
 #endif

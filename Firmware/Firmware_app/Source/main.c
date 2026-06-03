@@ -42,11 +42,13 @@ int main(void)
         USR_CONFIG_set_default_config();
     }
 
-    if (0 == USR_CONFIG_read_cogging_map()) {
-        AnticoggingValid = true;
-    } else {
-        USR_CONFIG_set_default_cogging_map();
+    if (0 != USR_CONFIG_axis_read_cogging_map(MOTOR_HW_AXIS_LEFT)) {
+        USR_CONFIG_axis_set_default_cogging_map(MOTOR_HW_AXIS_LEFT);
     }
+    if (0 != USR_CONFIG_axis_read_cogging_map(MOTOR_HW_AXIS_RIGHT)) {
+        USR_CONFIG_axis_set_default_cogging_map(MOTOR_HW_AXIS_RIGHT);
+    }
+    AnticoggingValid = *USR_CONFIG_anticogging_valid(CONTROLLER_active_axis());
 
     CAN_set_node_id(UsrConfig.node_id);
     CAN_hw_init(UsrConfig.can_baudrate);
@@ -70,20 +72,18 @@ int main(void)
         delay_ms(2);
     }
 
-    if (PWMC_CurrentReadingPolarization() != 0) {
-        StatuswordNew.errors.selftest = 1;
+    if (PWMC_CurrentReadingAxisPolarization(MOTOR_HW_AXIS_LEFT) != 0) {
+        MCT_axis_statusword(MOTOR_HW_AXIS_LEFT)->errors.selftest = 1;
+    }
+
+    if (PWMC_CurrentReadingAxisPolarization(MOTOR_HW_AXIS_RIGHT) != 0) {
+        MCT_axis_statusword(MOTOR_HW_AXIS_RIGHT)->errors.selftest = 1;
     }
 
     MCT_set_state(IDLE);
 
-    uint32_t tick = 0;
-
     while (1) {
         MCT_low_priority_task();
-
-        if (get_ms_since(tick) > 1000) {
-            tick = SystickCount;
-        }
     }
 }
 

@@ -18,11 +18,15 @@
 #define __ANTICOGGING_H__
 
 #include "ctm_types.h"
+#include "motor_hw.h"
 
 extern bool AnticoggingValid;
 
 void ANTICOGGING_start(void);
+void ANTICOGGING_select_axis(motor_hw_axis_t axis);
+void ANTICOGGING_axis_start(motor_hw_axis_t axis);
 void ANTICOGGING_end(void);
 void ANTICOGGING_loop(void);
+motor_hw_axis_t ANTICOGGING_active_axis(void);
 
 #endif

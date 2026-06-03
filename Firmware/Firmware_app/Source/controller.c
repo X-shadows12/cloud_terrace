@@ -16,6 +16,7 @@
 
 #include "controller.h"
 #include "anticogging.h"
+#include "board_port.h"
 #include "encoder.h"
 #include "foc.h"
 #include "mc_task.h"
@@ -25,293 +26,467 @@
 #include "util.h"
 
 tController Controller;
+tController ControllerAxes[2];
+tTraj TrajAxes[2];
+
+static uint8_t controller_axis_index(motor_hw_axis_t axis);
+static bool controller_axis_home_ready(motor_hw_axis_t axis);
+static void controller_zero_axis_home(motor_hw_axis_t axis, bool reset_controller);
+static void controller_sync_active_from_legacy(void);
+static void controller_sync_legacy_from_active(void);
 
 int CONTROLLER_set_op_mode(tControlMode mode)
+{
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+    int ret = 0;
+
+    ret += CONTROLLER_axis_set_op_mode(MOTOR_HW_AXIS_LEFT, mode);
+    ret += CONTROLLER_axis_set_op_mode(MOTOR_HW_AXIS_RIGHT, mode);
+    Controller.ctrl_mode = mode;
+
+    return (ret == 0) ? 0 : -1;
+#else
+    return CONTROLLER_axis_set_op_mode(CONTROLLER_active_axis(), mode);
+#endif
+}
+
+int CONTROLLER_axis_set_op_mode(motor_hw_axis_t axis, tControlMode mode)
 {
     if (mode > CONTROL_MODE_POSITION_PROFILE) {
         return -1;
     }
 
-    MOTOR_HW_enter_critical();
-
+    CONTROLLER_axis(axis)->ctrl_mode = mode;
     Controller.ctrl_mode = mode;
-    CONTROLLER_reset();
-
-    MOTOR_HW_exit_critical();
+    CONTROLLER_axis_reset(axis);
 
     return 0;
 }
 
 int CONTROLLER_set_home(void)
 {
-    int ret = 0;
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+    tFSMState state = MCT_get_state();
+    bool left_enabled = MCT_axis_is_enabled(MOTOR_HW_AXIS_LEFT);
+    bool right_enabled = MCT_axis_is_enabled(MOTOR_HW_AXIS_RIGHT);
 
-    if (MCT_get_state() == IDLE) {
-        Encoder.shadow_count = 0;
-    } else if (MCT_get_state() == RUN) {
-        if (ABS(Encoder.vel) < 0.5f && Traj.profile_done) {
-            MOTOR_HW_enter_critical();
-            Controller.input_position        = 0;
-            Controller.input_position_buffer = 0;
-            Controller.pos_setpoint          = 0;
-            Encoder.shadow_count             = 0;
-            Encoder.pos                      = 0;
-            MOTOR_HW_exit_critical();
-        } else {
-            ret = -1;
-        }
-    } else {
-        ret = -1;
+    if ((state != IDLE) && (state != RUN) && (state != CALIBRATION)) {
+        return -1;
     }
 
-    return ret;
+    if (MCT_axis_is_calibrating(MOTOR_HW_AXIS_LEFT)
+        || MCT_axis_is_calibrating(MOTOR_HW_AXIS_RIGHT)) {
+        return -1;
+    }
+
+    if ((left_enabled && !controller_axis_home_ready(MOTOR_HW_AXIS_LEFT))
+        || (right_enabled && !controller_axis_home_ready(MOTOR_HW_AXIS_RIGHT))) {
+        return -1;
+    }
+
+    MOTOR_HW_enter_critical();
+    controller_zero_axis_home(MOTOR_HW_AXIS_LEFT, left_enabled);
+    controller_zero_axis_home(MOTOR_HW_AXIS_RIGHT, right_enabled);
+    MOTOR_HW_exit_critical();
+    controller_sync_legacy_from_active();
+    return 0;
+#else
+    return CONTROLLER_axis_set_home(CONTROLLER_active_axis());
+#endif
+}
+
+int CONTROLLER_axis_set_home(motor_hw_axis_t axis)
+{
+    tFSMState state = MCT_get_state();
+    bool enabled = MCT_axis_is_enabled(axis);
+
+    if ((state != IDLE) && (state != RUN) && (state != CALIBRATION)) {
+        return -1;
+    }
+
+    if (MCT_axis_is_calibrating(axis)) {
+        return -1;
+    }
+
+    if (enabled && !controller_axis_home_ready(axis)) {
+        return -1;
+    }
+
+    MOTOR_HW_enter_critical();
+    controller_zero_axis_home(axis, enabled);
+    MOTOR_HW_exit_critical();
+    controller_sync_legacy_from_active();
+    return 0;
 }
 
 void CONTROLLER_sync_callback(void)
 {
-    if (MCT_get_state() != RUN) {
+    CONTROLLER_axis_sync_callback(CONTROLLER_active_axis());
+}
+
+void CONTROLLER_axis_sync_callback(motor_hw_axis_t axis)
+{
+    tController *controller = CONTROLLER_axis(axis);
+    volatile tMCStatusword *statusword = MCT_axis_statusword(axis);
+
+    if (!MCT_axis_is_enabled(axis)) {
         return;
     }
 
-    switch (Controller.ctrl_mode) {
+    switch (controller->ctrl_mode) {
     case CONTROL_MODE_CURRENT_RAMP:
-        Controller.input_current = Controller.input_current_buffer;
+        controller->input_current = controller->input_current_buffer;
         break;
 
     case CONTROL_MODE_VELOCITY_RAMP:
-        Controller.input_velocity = Controller.input_velocity_buffer;
+        controller->input_velocity = controller->input_velocity_buffer;
         break;
 
     case CONTROL_MODE_POSITION_FILTER:
-        Controller.input_position = Controller.input_position_buffer;
+        controller->input_position = controller->input_position_buffer;
         break;
 
     case CONTROL_MODE_POSITION_PROFILE:
-        Controller.input_position = Controller.input_position_buffer;
-        Controller.input_updated  = true;
+        controller->input_position = controller->input_position_buffer;
+        controller->input_updated  = true;
         break;
 
     default:
         break;
     }
 
-    StatuswordNew.status.target_reached = 0;
+    statusword->status.target_reached = 0;
+    if (axis == CONTROLLER_active_axis()) {
+        controller_sync_legacy_from_active();
+    }
 }
 
 void CONTROLLER_init(void)
 {
-    if ((UsrConfig.default_op_mode < CONTROL_MODE_CURRENT_RAMP)
-        || (UsrConfig.default_op_mode > CONTROL_MODE_POSITION_PROFILE)) {
-        UsrConfig.default_op_mode = CONTROL_MODE_POSITION_PROFILE;
-    }
-
-    Controller.ctrl_mode = (tControlMode) UsrConfig.default_op_mode;
-
-    CONTROLLER_update_input_pos_filter_gain(UsrConfig.position_filter_bw);
+    CONTROLLER_axis_init(MOTOR_HW_AXIS_LEFT);
+    CONTROLLER_axis_init(MOTOR_HW_AXIS_RIGHT);
+    controller_sync_legacy_from_active();
 }
 
 void CONTROLLER_update_input_pos_filter_gain(float bw)
 {
-    float bandwidth                = bw * M_2PI;
-    Controller.input_pos_filter_ki = 2.0f * bandwidth;
-    Controller.input_pos_filter_kp = 0.25f * SQ(Controller.input_pos_filter_ki);
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+    CONTROLLER_update_axis_input_pos_filter_gain(MOTOR_HW_AXIS_LEFT, bw);
+    CONTROLLER_update_axis_input_pos_filter_gain(MOTOR_HW_AXIS_RIGHT, bw);
+#else
+    CONTROLLER_update_axis_input_pos_filter_gain(CONTROLLER_active_axis(), bw);
+#endif
+    controller_sync_legacy_from_active();
 }
 
 void CONTROLLER_reset(void)
 {
-    MOTOR_HW_enter_critical();
-
-    float pos_meas = Encoder.pos;
-
-    if (MCT_get_state() == ANTICOGGING) {
-        pos_meas = (Encoder.count_in_cpr / ENCODER_CPR_F);
-    }
-
-    Controller.input_position = pos_meas;
-    Controller.input_velocity = 0.0f;
-    Controller.input_current  = 0.0f;
-
-    Controller.input_position_buffer = pos_meas;
-    Controller.input_velocity_buffer = 0.0f;
-    Controller.input_current_buffer  = 0.0f;
-
-    Controller.pos_setpoint = pos_meas;
-    Controller.vel_setpoint = 0.0f;
-    Controller.cur_setpoint = 0.0f;
-
-    Controller.vel_integrator = 0;
-
-    Controller.input_updated = false;
-    Traj.profile_done        = true;
-
-    Foc.current_ctrl_integral_d = 0;
-    Foc.current_ctrl_integral_q = 0;
-
-    MOTOR_HW_exit_critical();
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+    CONTROLLER_axis_reset(MOTOR_HW_AXIS_LEFT);
+    CONTROLLER_axis_reset(MOTOR_HW_AXIS_RIGHT);
+#else
+    CONTROLLER_axis_reset(CONTROLLER_active_axis());
+#endif
+    controller_sync_legacy_from_active();
 }
 
 void CONTROLLER_loop(void)
 {
-    float       vel_des        = 0.0f;
-    bool        position_hold_deadband = false;
-    const float pos_meas       = Encoder.pos;
-    const float vel_meas       = Encoder.vel;
-    const float phase_meas     = Encoder.phase;
-    const float phase_vel_meas = Encoder.phase_vel;
+    controller_sync_active_from_legacy();
+    CONTROLLER_axis_loop(CONTROLLER_active_axis());
+    controller_sync_legacy_from_active();
+}
 
-    if (MCT_get_state() == RUN) {
-        switch (Controller.ctrl_mode) {
-        // Current ramp
+tController *CONTROLLER_axis(motor_hw_axis_t axis)
+{
+    return &ControllerAxes[controller_axis_index(axis)];
+}
+
+tTraj *CONTROLLER_axis_traj(motor_hw_axis_t axis)
+{
+    return &TrajAxes[controller_axis_index(axis)];
+}
+
+void CONTROLLER_axis_init(motor_hw_axis_t axis)
+{
+    tController *controller = CONTROLLER_axis(axis);
+    tTraj *traj = CONTROLLER_axis_traj(axis);
+    tAxisConfig *config = USR_CONFIG_axis(axis);
+
+    if ((config->default_op_mode < CONTROL_MODE_CURRENT_RAMP)
+        || (config->default_op_mode > CONTROL_MODE_POSITION_PROFILE)) {
+        config->default_op_mode = CONTROL_MODE_POSITION_PROFILE;
+    }
+
+    controller->ctrl_mode = (tControlMode) config->default_op_mode;
+    controller->input_updated = false;
+    traj->profile_done = true;
+    CONTROLLER_update_axis_input_pos_filter_gain(axis, config->position_filter_bw);
+}
+
+void CONTROLLER_update_axis_input_pos_filter_gain(motor_hw_axis_t axis, float bw)
+{
+    tController *controller = CONTROLLER_axis(axis);
+    float bandwidth = bw * M_2PI;
+
+    controller->input_pos_filter_ki = 2.0f * bandwidth;
+    controller->input_pos_filter_kp = 0.25f * SQ(controller->input_pos_filter_ki);
+}
+
+void CONTROLLER_axis_reset(motor_hw_axis_t axis)
+{
+    tController *controller = CONTROLLER_axis(axis);
+    tEncoder *encoder = ENCODER_axis(axis);
+    tTraj *traj = CONTROLLER_axis_traj(axis);
+
+    MOTOR_HW_enter_critical();
+
+    float pos_meas = encoder->pos;
+
+    if (MCT_get_state() == ANTICOGGING) {
+        pos_meas = (encoder->count_in_cpr / ENCODER_CPR_F);
+    }
+
+    controller->input_position = pos_meas;
+    controller->input_velocity = 0.0f;
+    controller->input_current  = 0.0f;
+
+    controller->input_position_buffer = pos_meas;
+    controller->input_velocity_buffer = 0.0f;
+    controller->input_current_buffer  = 0.0f;
+
+    controller->pos_setpoint = pos_meas;
+    controller->vel_setpoint = 0.0f;
+    controller->cur_setpoint = 0.0f;
+
+    controller->vel_integrator = 0;
+
+    controller->input_updated = false;
+    traj->profile_done        = true;
+
+    FOC_reset_axis_current_integrator(axis);
+
+    MOTOR_HW_exit_critical();
+}
+
+void CONTROLLER_axis_loop(motor_hw_axis_t axis)
+{
+    tController *controller = CONTROLLER_axis(axis);
+    tEncoder *encoder = ENCODER_axis(axis);
+    tTraj *traj = CONTROLLER_axis_traj(axis);
+    tAxisConfig *config = USR_CONFIG_axis(axis);
+    volatile tMCStatusword *statusword = MCT_axis_statusword(axis);
+    float       vel_des = 0.0f;
+    bool        position_hold_deadband = false;
+    const float pos_meas = encoder->pos;
+    const float vel_meas = encoder->vel;
+    const float phase_meas = encoder->phase;
+    const float phase_vel_meas = encoder->phase_vel;
+
+    if (MCT_axis_is_enabled(axis)) {
+        switch (controller->ctrl_mode) {
         case CONTROL_MODE_CURRENT_RAMP: {
-            float max_step_size = ABS(CURRENT_MEASURE_PERIOD * UsrConfig.current_ramp_rate);
-            float full_step     = Controller.input_current - Controller.cur_setpoint;
-            float step          = CLAMP(full_step, -max_step_size, max_step_size);
-            Controller.cur_setpoint += step;
+            float max_step_size = ABS(CURRENT_MEASURE_PERIOD * config->current_ramp_rate);
+            float full_step = controller->input_current - controller->cur_setpoint;
+            float step = CLAMP(full_step, -max_step_size, max_step_size);
+            controller->cur_setpoint += step;
         } break;
 
-        // Velocity ramp
         case CONTROL_MODE_VELOCITY_RAMP: {
-            float max_step_size = ABS(CURRENT_MEASURE_PERIOD * UsrConfig.velocity_ramp_rate);
-            float full_step     = Controller.input_velocity - Controller.vel_setpoint;
-            float step          = CLAMP(full_step, -max_step_size, max_step_size);
-            Controller.vel_setpoint += step;
-            Controller.cur_setpoint = UsrConfig.current_ff_gain * (step / CURRENT_MEASURE_PERIOD);
+            float max_step_size = ABS(CURRENT_MEASURE_PERIOD * config->velocity_ramp_rate);
+            float full_step = controller->input_velocity - controller->vel_setpoint;
+            float step = CLAMP(full_step, -max_step_size, max_step_size);
+            controller->vel_setpoint += step;
+            controller->cur_setpoint = config->current_ff_gain * (step / CURRENT_MEASURE_PERIOD);
 
-            // Target reached check
-            if (StatuswordNew.status.target_reached == 0) {
-                if (ABS(Controller.input_velocity - vel_meas) < UsrConfig.target_velcity_window) {
-                    StatuswordNew.status.target_reached = 1;
+            if (statusword->status.target_reached == 0) {
+                if (ABS(controller->input_velocity - vel_meas) < config->target_velcity_window) {
+                    statusword->status.target_reached = 1;
                 }
             }
         } break;
 
-        // Position filter
         case CONTROL_MODE_POSITION_FILTER: {
-            // 2nd order pos tracking filter
-            float delta_pos = Controller.input_position - Controller.pos_setpoint;
-            float delta_vel = Controller.input_velocity - Controller.vel_setpoint; // Vel error
-            float accel     = Controller.input_pos_filter_kp * delta_pos
-                          + Controller.input_pos_filter_ki * delta_vel;                  // Feedback
-            Controller.cur_setpoint = UsrConfig.current_ff_gain * accel;                 // Accel
-            Controller.vel_setpoint += CURRENT_MEASURE_PERIOD * accel;                   // Delta vel
-            Controller.pos_setpoint += CURRENT_MEASURE_PERIOD * Controller.vel_setpoint; // Delta pos
+            float delta_pos = controller->input_position - controller->pos_setpoint;
+            float delta_vel = controller->input_velocity - controller->vel_setpoint;
+            float accel = controller->input_pos_filter_kp * delta_pos
+                        + controller->input_pos_filter_ki * delta_vel;
+            controller->cur_setpoint = config->current_ff_gain * accel;
+            controller->vel_setpoint += CURRENT_MEASURE_PERIOD * accel;
+            controller->pos_setpoint += CURRENT_MEASURE_PERIOD * controller->vel_setpoint;
         } break;
 
-        // Position profile
         case CONTROL_MODE_POSITION_PROFILE: {
-            if (Controller.input_updated) {
-                Controller.input_updated = false;
+            if (controller->input_updated) {
+                controller->input_updated = false;
 
-                TRAJ_plan(Controller.input_position,
-                          Controller.pos_setpoint,
-                          Controller.vel_setpoint,
-                          UsrConfig.profile_velocity, // Velocity
-                          UsrConfig.profile_accel,    // Acceleration
-                          UsrConfig.profile_decel);   // Deceleration
+                TRAJ_plan_axis(traj,
+                               controller->input_position,
+                               controller->pos_setpoint,
+                               controller->vel_setpoint,
+                               config->profile_velocity,
+                               config->profile_accel,
+                               config->profile_decel);
             }
 
-            if (Traj.profile_done) {
-                // Target reached check
-                if (StatuswordNew.status.target_reached == 0) {
-                    if (ABS(Controller.input_position - pos_meas) < UsrConfig.target_position_window) {
-                        StatuswordNew.status.target_reached = 1;
+            if (traj->profile_done) {
+                if (statusword->status.target_reached == 0) {
+                    if (ABS(controller->input_position - pos_meas) < config->target_position_window) {
+                        statusword->status.target_reached = 1;
                     }
                 }
                 break;
             }
 
-            TRAJ_eval();
-            Controller.pos_setpoint = Traj.Y;
-            Controller.vel_setpoint = Traj.Yd;
-            Controller.cur_setpoint = Traj.Ydd * UsrConfig.current_ff_gain;
+            TRAJ_eval_axis(traj);
+            controller->pos_setpoint = traj->Y;
+            controller->vel_setpoint = traj->Yd;
+            controller->cur_setpoint = traj->Ydd * config->current_ff_gain;
         } break;
 
         default:
             break;
         }
 
-        // Position control
-        vel_des = Controller.vel_setpoint;
-        if (Controller.ctrl_mode >= CONTROL_MODE_POSITION_FILTER) {
-            float pos_err = Controller.pos_setpoint - pos_meas;
+        vel_des = controller->vel_setpoint;
+        if (controller->ctrl_mode >= CONTROL_MODE_POSITION_FILTER) {
+            float pos_err = controller->pos_setpoint - pos_meas;
 
-            if ((Controller.ctrl_mode == CONTROL_MODE_POSITION_PROFILE) && Traj.profile_done
-                && (ABS(pos_err) < UsrConfig.target_position_window)) {
-                pos_err                   = 0.0f;
-                vel_des                   = 0.0f;
-                Controller.vel_setpoint   = 0.0f;
-                Controller.cur_setpoint   = 0.0f;
-                Controller.vel_integrator = 0.0f;
-                position_hold_deadband    = true;
+            if ((controller->ctrl_mode == CONTROL_MODE_POSITION_PROFILE) && traj->profile_done
+                && (ABS(pos_err) < config->target_position_window)) {
+                pos_err                    = 0.0f;
+                vel_des                    = 0.0f;
+                controller->vel_setpoint   = 0.0f;
+                controller->cur_setpoint   = 0.0f;
+                controller->vel_integrator = 0.0f;
+                position_hold_deadband     = true;
             }
 
-            vel_des += UsrConfig.pos_p_gain * pos_err;
+            vel_des += config->pos_p_gain * pos_err;
         }
     } else {
-        // Anticogging calib
-        float pos_err = Controller.input_position - (Encoder.count_in_cpr / ENCODER_CPR_F);
+        float pos_err = controller->input_position - (encoder->count_in_cpr / ENCODER_CPR_F);
         if (pos_err > +0.5f)
             pos_err -= 1.0f;
         if (pos_err < -0.5f)
             pos_err += 1.0f;
-        vel_des = UsrConfig.pos_p_gain * pos_err;
+        vel_des = config->pos_p_gain * pos_err;
     }
 
-    // Velocity limiting
-    vel_des = CLAMP(vel_des, -UsrConfig.velocity_limit, +UsrConfig.velocity_limit);
+    vel_des = CLAMP(vel_des, -config->velocity_limit, +config->velocity_limit);
 
-    // Velocity control
-    float iq_set = Controller.cur_setpoint;
-
+    float iq_set = controller->cur_setpoint;
     float v_err = 0.0f;
     if (position_hold_deadband) {
         iq_set = 0.0f;
-    } else if (Controller.ctrl_mode >= CONTROL_MODE_VELOCITY_RAMP) {
+    } else if (controller->ctrl_mode >= CONTROL_MODE_VELOCITY_RAMP) {
         v_err = vel_des - vel_meas;
-        iq_set += UsrConfig.vel_p_gain * v_err;
-
-        // Velocity integral action before limiting
-        iq_set += Controller.vel_integrator;
+        iq_set += config->vel_p_gain * v_err;
+        iq_set += controller->vel_integrator;
     }
 
-    // Velocity limiting in current mode
-    if (Controller.ctrl_mode < CONTROL_MODE_VELOCITY_RAMP) {
-        float Imax = (+UsrConfig.velocity_limit - vel_meas) * UsrConfig.vel_p_gain;
-        float Imin = (-UsrConfig.velocity_limit - vel_meas) * UsrConfig.vel_p_gain;
-        iq_set     = CLAMP(iq_set, Imin, Imax);
+    if (controller->ctrl_mode < CONTROL_MODE_VELOCITY_RAMP) {
+        float Imax = (+config->velocity_limit - vel_meas) * config->vel_p_gain;
+        float Imin = (-config->velocity_limit - vel_meas) * config->vel_p_gain;
+        iq_set = CLAMP(iq_set, Imin, Imax);
     }
 
-    // Anticogging
-    if ((!position_hold_deadband) && UsrConfig.anticogging_enable && AnticoggingValid) {
-        int16_t index = nearbyintf(COGGING_MAP_NUM * Encoder.count_in_cpr / ENCODER_CPR_F);
+    if ((!position_hold_deadband)
+        && config->anticogging_enable
+        && AnticoggingValidAxes[controller_axis_index(axis)]) {
+        int16_t index = nearbyintf(COGGING_MAP_NUM * encoder->count_in_cpr / ENCODER_CPR_F);
         if (index >= COGGING_MAP_NUM) {
             index = 0;
         }
-        iq_set += pCoggingMap->map[index] / 5000.0f;
+        iq_set += USR_CONFIG_cogging_map(axis)->map[index] / 5000.0f;
     }
 
-    // Current limit
     bool limited = false;
-    if (iq_set > +UsrConfig.current_limit) {
+    if (iq_set > +config->current_limit) {
         limited = true;
-        iq_set  = +UsrConfig.current_limit;
+        iq_set  = +config->current_limit;
     }
-    if (iq_set < -UsrConfig.current_limit) {
+    if (iq_set < -config->current_limit) {
         limited = true;
-        iq_set  = -UsrConfig.current_limit;
+        iq_set  = -config->current_limit;
     }
 
-    FOC_current(0, iq_set, phase_meas, phase_vel_meas);
+    FOC_axis_current(axis, 0, iq_set, phase_meas, phase_vel_meas);
 
-    // Velocity integrator
-    if ((Controller.ctrl_mode < CONTROL_MODE_VELOCITY_RAMP) || position_hold_deadband) {
-        // reset integral if not in use
-        Controller.vel_integrator = 0.0f;
+    if ((controller->ctrl_mode < CONTROL_MODE_VELOCITY_RAMP) || position_hold_deadband) {
+        controller->vel_integrator = 0.0f;
     } else {
         if (limited) {
-            Controller.vel_integrator *= 0.99f;
+            controller->vel_integrator *= 0.99f;
         } else {
-            Controller.vel_integrator += (UsrConfig.vel_i_gain * CURRENT_MEASURE_PERIOD) * v_err;
+            controller->vel_integrator += (config->vel_i_gain * CURRENT_MEASURE_PERIOD) * v_err;
         }
     }
+}
+
+void CONTROLLER_broadcast_legacy_command(void)
+{
+    for (uint8_t i = 0U; i < 2U; i++) {
+        tController *controller = &ControllerAxes[i];
+
+        controller->ctrl_mode = Controller.ctrl_mode;
+        controller->input_position = Controller.input_position;
+        controller->input_velocity = Controller.input_velocity;
+        controller->input_current = Controller.input_current;
+        controller->input_position_buffer = Controller.input_position_buffer;
+        controller->input_velocity_buffer = Controller.input_velocity_buffer;
+        controller->input_current_buffer = Controller.input_current_buffer;
+        controller->input_updated = Controller.input_updated;
+    }
+}
+
+motor_hw_axis_t CONTROLLER_active_axis(void)
+{
+#if defined(BOARD_USE_RIGHT_MOTOR)
+    return MOTOR_HW_AXIS_RIGHT;
+#else
+    return MOTOR_HW_AXIS_LEFT;
+#endif
+}
+
+static uint8_t controller_axis_index(motor_hw_axis_t axis)
+{
+    return (axis == MOTOR_HW_AXIS_RIGHT) ? 1U : 0U;
+}
+
+static bool controller_axis_home_ready(motor_hw_axis_t axis)
+{
+    return ((ABS(ENCODER_axis(axis)->vel) < 0.5f)
+            && CONTROLLER_axis_traj(axis)->profile_done);
+}
+
+static void controller_zero_axis_home(motor_hw_axis_t axis, bool reset_controller)
+{
+    tController *controller = CONTROLLER_axis(axis);
+    tEncoder *encoder = ENCODER_axis(axis);
+
+    if (reset_controller) {
+        controller->input_position = 0.0f;
+        controller->input_position_buffer = 0.0f;
+        controller->pos_setpoint = 0.0f;
+    }
+
+    encoder->shadow_count = 0;
+    encoder->pos = 0.0f;
+}
+
+static void controller_sync_active_from_legacy(void)
+{
+    motor_hw_axis_t axis = CONTROLLER_active_axis();
+
+    *CONTROLLER_axis(axis) = Controller;
+    *CONTROLLER_axis_traj(axis) = Traj;
+}
+
+static void controller_sync_legacy_from_active(void)
+{
+    motor_hw_axis_t axis = CONTROLLER_active_axis();
+
+    Controller = *CONTROLLER_axis(axis);
+    Traj = *CONTROLLER_axis_traj(axis);
 }

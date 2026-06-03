@@ -18,6 +18,7 @@
 #define __FOC_H__
 
 #include <stdbool.h>
+#include "motor_hw.h"
 
 typedef struct sFOC
 {
@@ -33,6 +34,7 @@ typedef struct sFOC
 } tFOC;
 
 extern tFOC Foc;
+extern tFOC FocAxes[2];
 
 void FOC_init(void);
 void FOC_update_current_ctrl_gain(float bw);
@@ -40,5 +42,15 @@ void FOC_arm(void);
 void FOC_disarm(void);
 void FOC_voltage(float Vd_set, float Vq_set, float phase);
 void FOC_current(float Id_set, float Iq_set, float phase, float phase_vel);
+
+tFOC *FOC_axis(motor_hw_axis_t axis);
+void FOC_axis_init(motor_hw_axis_t axis);
+void FOC_update_axis_current_ctrl_gain(motor_hw_axis_t axis, float bw);
+void FOC_axis_arm(motor_hw_axis_t axis);
+void FOC_axis_disarm(motor_hw_axis_t axis);
+void FOC_axis_voltage(motor_hw_axis_t axis, float Vd_set, float Vq_set, float phase);
+void FOC_axis_current(motor_hw_axis_t axis, float Id_set, float Iq_set, float phase, float phase_vel);
+void FOC_reset_axis_current_integrator(motor_hw_axis_t axis);
+void FOC_reset_current_integrator(void);
 
 #endif

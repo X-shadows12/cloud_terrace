@@ -18,6 +18,7 @@
 #define __ENCODER_H__
 
 #include "ctm_types.h"
+#include "motor_hw.h"
 
 #define ENCODER_CPR     (int) 32768
 #define ENCODER_CPR_F   (32768.0f)
@@ -53,9 +54,15 @@ typedef struct sEncoder
 } tEncoder;
 
 extern tEncoder Encoder;
+extern tEncoder EncoderAxes[2];
 
 void ENCODER_init(void);
 bool ENCODER_sample(void);
 void ENCODER_loop(void);
+tEncoder *ENCODER_axis(motor_hw_axis_t axis);
+void ENCODER_axis_init(motor_hw_axis_t axis);
+bool ENCODER_axis_sample(motor_hw_axis_t axis);
+void ENCODER_axis_loop(motor_hw_axis_t axis);
+motor_hw_axis_t ENCODER_active_axis(void);
 
 #endif

@@ -28,15 +28,28 @@
 #define CURRENT_MEASURE_HZ           MOTOR_CURRENT_MEASURE_HZ
 #define CURRENT_MEASURE_PERIOD       MOTOR_CURRENT_MEASURE_PERIOD
 
+#define MOTOR_HW_AXIS_COUNT          2U
+
+typedef enum {
+    MOTOR_HW_AXIS_LEFT = 0U,
+    MOTOR_HW_AXIS_RIGHT = 1U,
+} motor_hw_axis_t;
+
 void  MOTOR_HW_enter_critical(void);
 void  MOTOR_HW_exit_critical(void);
 void  MOTOR_HW_set_phase_duty(float duty_a, float duty_b, float duty_c);
+void  MOTOR_HW_set_axis_phase_duty(motor_hw_axis_t axis, float duty_a, float duty_b, float duty_c);
 void  MOTOR_HW_turn_on_low_sides(void);
+void  MOTOR_HW_turn_on_axis_low_sides(motor_hw_axis_t axis);
 void  MOTOR_HW_switch_off_pwm(void);
+void  MOTOR_HW_switch_off_axis_pwm(motor_hw_axis_t axis);
 float MOTOR_HW_read_vbus_voltage(void);
 float MOTOR_HW_read_phase_a_current(void);
 float MOTOR_HW_read_phase_b_current(void);
+float MOTOR_HW_read_axis_phase_a_current(motor_hw_axis_t axis);
+float MOTOR_HW_read_axis_phase_b_current(motor_hw_axis_t axis);
 int   MOTOR_HW_read_driver_temp(void);
 int   MOTOR_HW_read_ntc_temp(void);
+int   MOTOR_HW_calibrate_axis_current_offset(motor_hw_axis_t axis);
 
 #endif

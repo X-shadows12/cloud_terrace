@@ -18,9 +18,20 @@
 #define __CALIBRATION_H__
 
 #include "ctm_types.h"
+#include "motor_hw.h"
 
 void CALIBRATION_start(void);
+void CALIBRATION_axis_start(motor_hw_axis_t axis);
+void CALIBRATION_select_axis(motor_hw_axis_t axis);
 void CALIBRATION_end(void);
-void CALIBRATION_loop(void);
+motor_hw_axis_t CALIBRATION_active_axis(void);
+
+typedef enum eCalibrationResult {
+    CALIBRATION_RESULT_RUNNING = 0,
+    CALIBRATION_RESULT_DONE,
+    CALIBRATION_RESULT_FAILED,
+} tCalibrationResult;
+
+tCalibrationResult CALIBRATION_loop(void);
 
 #endif

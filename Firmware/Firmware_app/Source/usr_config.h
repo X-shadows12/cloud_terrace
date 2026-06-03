@@ -18,6 +18,7 @@
 #define __USR_CONFIG_H__
 
 #include "ctm_types.h"
+#include "motor_hw.h"
 
 #define FW_VERSION_MAJOR 1
 #define FW_VERSION_MINOR 0
@@ -32,7 +33,7 @@ typedef enum {
     CAN_BAUDRATE_1000K,
 } tCanBaudrate;
 
-typedef struct sUsrConfig
+typedef struct sAxisConfig
 {
     // Motor
     int32_t invert_motor_dir;       // 0 False : 1 True
@@ -71,8 +72,55 @@ typedef struct sUsrConfig
     int32_t protect_drv_over_tmp;  // [℃] (0~150)
     int32_t protect_ntc_over_tmp;  // [℃] (0~150)
 
+    // Encoder
+    int32_t calib_valid;                // (Auto)
+    int32_t encoder_dir;                // (Auto)
+    int32_t encoder_offset;             // (Auto)
+    int32_t offset_lut[OFFSET_LUT_NUM]; // (Auto)
+} tAxisConfig;
+
+typedef struct sUsrConfig
+{
+    // Axis 0 legacy storage, kept at the original offsets.
+    // Motor
+    int32_t invert_motor_dir;       // 0 False : 1 True
+    int32_t motor_pole_pairs;       // [PP]      (2~30)
+    float   motor_phase_resistance; // [R]       (0~10)
+    float   motor_phase_inductance; // [H]       (0~1)
+    float   current_limit;          // [A]       (0~10)
+    float   velocity_limit;         // [r/s]     (0~100)
+
+    // Calibration
+    float calib_current; // [A] (0~10)
+    float calib_voltage; // [V] (0~50)
+
+    // Controller
+    float   pos_p_gain;
+    float   vel_p_gain;
+    float   vel_i_gain;
+    float   current_ff_gain; // [A/(r/s虏)]
+    float   current_ctrl_bw; // [Hz] (100~2000)
+    int32_t default_op_mode;
+    int32_t anticogging_enable;     // 0 False : 1 True
+    int32_t sync_target_enable;     // 0 False : 1 True
+    float   target_velcity_window;  // [r/s]
+    float   target_position_window; // [r]
+    float   current_ramp_rate;      // [A/s]
+    float   velocity_ramp_rate;     // [r/s虏]
+    float   position_filter_bw;     // [Hz] (0~1000)
+    float   profile_velocity;       // [r/s]
+    float   profile_accel;          // [r/s虏]
+    float   profile_decel;          // [r/s虏]
+
+    // Protect
+    float   protect_under_voltage; // [V] (0~50)
+    float   protect_over_voltage;  // [V] (0~50)
+    float   protect_over_current;  // [A] (0~10)
+    int32_t protect_drv_over_tmp;  // [鈩僝 (0~150)
+    int32_t protect_ntc_over_tmp;  // [鈩僝 (0~150)
+
     // CAN
-    int32_t node_id;               // (1~31)
+    int32_t node_id;               // (1~30 in dual-axis mode, 1~31 otherwise)
     int32_t can_baudrate;          // REF: tCanBaudrate
     int32_t heartbeat_consumer_ms; // rx heartbeat timeout in ms : 0 Disable
     int32_t heartbeat_producer_ms; // tx heartbeat interval in ms : 0 Disable
@@ -82,6 +130,9 @@ typedef struct sUsrConfig
     int32_t encoder_dir;                // (Auto)
     int32_t encoder_offset;             // (Auto)
     int32_t offset_lut[OFFSET_LUT_NUM]; // (Auto)
+
+    // Axis 1 independent parameters.
+    tAxisConfig axis_1;
 
     uint32_t crc;
 } tUsrConfig;
@@ -93,8 +144,16 @@ typedef struct sCoggingMap
 } tCoggingMap;
 
 extern tUsrConfig   UsrConfig;
+extern tAxisConfig  UsrConfigAxes[MOTOR_HW_AXIS_COUNT];
+extern bool         AnticoggingValidAxes[MOTOR_HW_AXIS_COUNT];
 extern tCoggingMap *pCoggingMap;
+extern tCoggingMap *pCoggingMapAxes[MOTOR_HW_AXIS_COUNT];
 
+tAxisConfig *USR_CONFIG_axis(motor_hw_axis_t axis);
+tCoggingMap *USR_CONFIG_cogging_map(motor_hw_axis_t axis);
+bool *USR_CONFIG_anticogging_valid(motor_hw_axis_t axis);
+void USR_CONFIG_sync_axes_from_storage(void);
+void USR_CONFIG_sync_storage_from_axes(void);
 void USR_CONFIG_set_default_config(void);
 int  USR_CONFIG_erease_config(void);
 int  USR_CONFIG_read_config(void);
@@ -104,5 +163,9 @@ void USR_CONFIG_set_default_cogging_map(void);
 int  USR_CONFIG_erease_cogging_map(void);
 int  USR_CONFIG_read_cogging_map(void);
 int  USR_CONFIG_save_cogging_map(void);
+void USR_CONFIG_axis_set_default_cogging_map(motor_hw_axis_t axis);
+int  USR_CONFIG_axis_erease_cogging_map(motor_hw_axis_t axis);
+int  USR_CONFIG_axis_read_cogging_map(motor_hw_axis_t axis);
+int  USR_CONFIG_axis_save_cogging_map(motor_hw_axis_t axis);
 
 #endif

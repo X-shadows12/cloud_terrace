@@ -17,7 +17,9 @@
 #ifndef __MC_TASKS_H__
 #define __MC_TASKS_H__
 
+#include <stdbool.h>
 #include "ctm_types.h"
+#include "motor_hw.h"
 
 #if defined(__CC_ARM)
 #pragma anon_unions
@@ -64,11 +66,20 @@ typedef struct sMCStatusword
 
 extern volatile tMCStatusword StatuswordNew;
 extern volatile tMCStatusword StatuswordOld;
+extern volatile tMCStatusword StatuswordNewAxes[MOTOR_HW_AXIS_COUNT];
+extern volatile tMCStatusword StatuswordOldAxes[MOTOR_HW_AXIS_COUNT];
 
 void      MCT_init(void);
 int       MCT_reset_error(void);
+int       MCT_axis_reset_error(motor_hw_axis_t axis);
+volatile tMCStatusword *MCT_axis_statusword(motor_hw_axis_t axis);
 tFSMState MCT_get_state(void);
 int       MCT_set_state(tFSMState state);
+int       MCT_axis_enable(motor_hw_axis_t axis);
+int       MCT_axis_disable(motor_hw_axis_t axis);
+int       MCT_axis_calibration_abort(motor_hw_axis_t axis);
+bool      MCT_axis_is_enabled(motor_hw_axis_t axis);
+bool      MCT_axis_is_calibrating(motor_hw_axis_t axis);
 
 void MCT_high_frequency_task(void);
 void MCT_safety_task(void);

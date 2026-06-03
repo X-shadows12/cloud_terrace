@@ -19,7 +19,12 @@ void UsageFault_Handler(void);
 void SVC_Handler(void);
 void DebugMon_Handler(void);
 void PendSV_Handler(void);
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+void BOARD_LEFT_PHASE_ADC_IRQHandler(void);
+void BOARD_RIGHT_PHASE_ADC_IRQHandler(void);
+#else
 void BOARD_PHASE_ADC_IRQHandler(void);
+#endif
 void BOARD_SYSTEM_TIMER_IRQHandler(void);
 #if (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_PWM)
 void TIMER3_IRQHandler(void);

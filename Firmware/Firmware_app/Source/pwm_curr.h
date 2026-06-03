@@ -17,10 +17,16 @@
 #ifndef __PWM_CURR_H__
 #define __PWM_CURR_H__
 
+#include "motor_hw.h"
+
 void PWMC_init(void);
 void PWMC_SwitchOnPWM(void);
 void PWMC_SwitchOffPWM(void);
 void PWMC_TurnOnLowSides(void);
 int  PWMC_CurrentReadingPolarization(void);
+void PWMC_SwitchOnAxisPWM(motor_hw_axis_t axis);
+void PWMC_SwitchOffAxisPWM(motor_hw_axis_t axis);
+void PWMC_TurnOnAxisLowSides(motor_hw_axis_t axis);
+int  PWMC_CurrentReadingAxisPolarization(motor_hw_axis_t axis);
 
 #endif

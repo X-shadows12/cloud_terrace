@@ -15,7 +15,10 @@
 */
 
 #include "can.h"
+#include "anticogging.h"
+#include "board_port.h"
 #include "can_hw.h"
+#include "calibration.h"
 #include "controller.h"
 #include "dfu.h"
 #include "encoder.h"
@@ -26,17 +29,9 @@
 #include "util.h"
 #include <string.h>
 
-#define CAN_DIAG_ENABLE 1
-
-#if CAN_DIAG_ENABLE
-#include "rtt_scope.h"
-#define CAN_LOG(format, ...) DEBUG(format, ##__VA_ARGS__)
-#else
-#define CAN_LOG(format, ...)
-#endif
-
 static uint8_t  mNodeID;
 static uint32_t mRxTick       = 0;
+static uint32_t mAxisRxTick[MOTOR_HW_AXIS_COUNT];
 static uint32_t mTxTick       = 0;
 static uint32_t mCanBusErrNew = 0;
 static uint32_t mCanBusErrOld = 0;
@@ -44,40 +39,47 @@ static uint32_t mCanBusErrOld = 0;
 static void can_error_check(void);
 static bool can_tx(CanFrame *tx_frame);
 static bool can_is_idle_and_disarmed(void);
-static const char *can_cmd_name(uint8_t cmd);
-static bool can_cmd_is_critical(uint8_t cmd);
-static void can_log_frame(const char *tag, const CanFrame *frame);
+static uint8_t can_axis_node_id(motor_hw_axis_t axis);
+static bool can_node_to_axis(uint8_t node_id, motor_hw_axis_t *axis);
+static bool can_frame_is_broadcast(const CanFrame *frame);
+static bool can_for_each_target_axis(uint8_t node_id, motor_hw_axis_t *axis, uint8_t *cursor);
+static void can_reset_axis_rx_timeout(motor_hw_axis_t axis);
+static void can_reset_target_rx_timeout(uint8_t node_id);
+static void can_check_rx_timeout(void);
+static void can_tx_heartbeat(void);
+static uint8_t can_axis_index(motor_hw_axis_t axis);
 
-static void fill_value(uint8_t idx, uint8_t *data);
+static void fill_value(motor_hw_axis_t axis, uint8_t idx, uint8_t *data);
+static void can_tx_axis_statusword_reply(motor_hw_axis_t axis);
+static void can_tx_axis_value_reply(motor_hw_axis_t axis, uint8_t cmd, uint8_t value_index);
 static void parse_frame(CanFrame *frame);
-static void config_callback(uint8_t *data, bool isSet);
+static void config_callback(motor_hw_axis_t axis, uint8_t *data, bool isSet);
 static void config_reject(uint8_t *data);
-static bool config_value_is_valid(int32_t idx, uint8_t *value);
+static bool config_value_is_valid(motor_hw_axis_t axis, int32_t idx, uint8_t *value);
 static bool int32_in_range(int32_t value, int32_t min_value, int32_t max_value);
 static bool float_in_range(float value, float min_value, float max_value);
 
 void CAN_set_node_id(uint8_t nodeID)
 {
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+    if (nodeID > 30U) {
+        nodeID = 30U;
+    }
+#endif
+    if (nodeID == 0U) {
+        nodeID = 1U;
+    }
     mNodeID = nodeID;
 }
 
 void CAN_comm_loop(void)
 {
-    // rx heartbeat timeout check
-    if (UsrConfig.heartbeat_consumer_ms) {
-        if (get_ms_since(mRxTick) > UsrConfig.heartbeat_consumer_ms) {
-            MCT_set_state(IDLE);
-        }
-    }
+    can_check_rx_timeout();
 
     // tx heartbeat timeout check
     if (UsrConfig.heartbeat_producer_ms) {
         if (get_ms_since(mTxTick) > UsrConfig.heartbeat_producer_ms) {
-            // Send heartbeat
-            CanFrame tx_frame;
-            tx_frame.id  = ID_ECHO_BIT | (mNodeID << 5) | CAN_CMD_HEARTBEAT;
-            tx_frame.dlc = 0;
-            can_tx(&tx_frame);
+            can_tx_heartbeat();
         }
     }
 
@@ -96,6 +98,8 @@ void CAN_receive_callback(void)
 void CAN_reset_rx_timeout(void)
 {
     mRxTick = SystickCount;
+    mAxisRxTick[0] = SystickCount;
+    mAxisRxTick[1] = SystickCount;
 }
 
 void CAN_reset_tx_timeout(void)
@@ -105,39 +109,38 @@ void CAN_reset_tx_timeout(void)
 
 void CAN_tx_statusword(tMCStatusword statusword)
 {
+    CAN_tx_axis_statusword(CONTROLLER_active_axis(), statusword);
+}
+
+void CAN_tx_axis_statusword(motor_hw_axis_t axis, tMCStatusword statusword)
+{
     CanFrame tx_frame;
-    tx_frame.id      = ID_ECHO_BIT | (mNodeID << 5) | CAN_CMD_STATUSWORD_REPORT;
+    tx_frame.id      = ID_ECHO_BIT | (can_axis_node_id(axis) << 5) | CAN_CMD_STATUSWORD_REPORT;
     tx_frame.data[0] = statusword.status.status_code;
     tx_frame.data[1] = statusword.errors.errors_code;
     tx_frame.dlc     = 2;
-    if (!can_tx(&tx_frame)) {
-        CAN_LOG("[CAN] drop statusword reply\n");
-    }
+    (void) can_tx(&tx_frame);
 }
 
 void CAN_calib_report(int32_t step, uint8_t *data)
 {
     CanFrame tx_frame;
-    tx_frame.id  = ID_ECHO_BIT | (mNodeID << 5) | CAN_CMD_CALIB_REPORT;
+    tx_frame.id  = ID_ECHO_BIT | (can_axis_node_id(CALIBRATION_active_axis()) << 5) | CAN_CMD_CALIB_REPORT;
     tx_frame.dlc = 0;
     tx_frame.dlc += int32_to_data(step, &tx_frame.data[tx_frame.dlc]);
     memcpy(&tx_frame.data[tx_frame.dlc], data, 4);
     tx_frame.dlc += 4;
-    if (!can_tx(&tx_frame)) {
-        CAN_LOG("[CAN] drop calib report step=%d\n", (int) step);
-    }
+    (void) can_tx(&tx_frame);
 }
 
 void CAN_anticogging_report(int32_t step, int32_t value)
 {
     CanFrame tx_frame;
-    tx_frame.id  = ID_ECHO_BIT | (mNodeID << 5) | CAN_CMD_ANTICOGGING_REPORT;
+    tx_frame.id  = ID_ECHO_BIT | (can_axis_node_id(ANTICOGGING_active_axis()) << 5) | CAN_CMD_ANTICOGGING_REPORT;
     tx_frame.dlc = 0;
     tx_frame.dlc += int32_to_data(step, &tx_frame.data[tx_frame.dlc]);
     tx_frame.dlc += int32_to_data(value, &tx_frame.data[tx_frame.dlc]);
-    if (!can_tx(&tx_frame)) {
-        CAN_LOG("[CAN] drop anticogging report step=%d\n", (int) step);
-    }
+    (void) can_tx(&tx_frame);
 }
 
 static void can_error_check(void)
@@ -146,12 +149,6 @@ static void can_error_check(void)
 
     if (mCanBusErrOld != mCanBusErrNew) {
         mCanBusErrOld = mCanBusErrNew;
-        CAN_LOG("[CAN] err state=%u rx_warn=%u tx_warn=%u busoff=%u\n",
-                (unsigned) (mCanBusErrNew & 0x03U),
-                (unsigned) !!(mCanBusErrNew & (1UL << 8)),
-                (unsigned) !!(mCanBusErrNew & (1UL << 9)),
-                (unsigned) !!(mCanBusErrNew & (1UL << 10)));
-
         if ((CAN_ERROR_STATE_PASSIVE == (can_error_state_enum) (mCanBusErrNew & 0x03U))
             || (CAN_ERROR_STATE_BUS_OFF == (can_error_state_enum) (mCanBusErrNew & 0x03U))) {
             CAN_hw_abort_tx();
@@ -165,162 +162,202 @@ static bool can_tx(CanFrame *tx_frame)
 
     if (sent) {
         CAN_reset_tx_timeout();
-    } else if (can_cmd_is_critical(GET_CMD(tx_frame->id))) {
-        CAN_LOG("[CAN] tx busy id=0x%03X cmd=%u(%s) dlc=%u\n",
-                (unsigned) (tx_frame->id & 0x7FFU),
-                (unsigned) GET_CMD(tx_frame->id),
-                can_cmd_name(GET_CMD(tx_frame->id)),
-                (unsigned) tx_frame->dlc);
     }
 
     return sent;
 }
 
-static bool can_is_idle_and_disarmed(void)
+static uint8_t can_axis_node_id(motor_hw_axis_t axis)
 {
-    return ((MCT_get_state() == IDLE) && (!Foc.is_armed));
-}
-
-static const char *can_cmd_name(uint8_t cmd)
-{
-    switch (cmd) {
-    case CAN_CMD_SET_OP_MODE:
-        return "SET_OP_MODE";
-    case CAN_CMD_MOTOR_ENABLE:
-        return "MOTOR_ENABLE";
-    case CAN_CMD_MOTOR_DISABLE:
-        return "MOTOR_DISABLE";
-    case CAN_CMD_SET_TORQUE:
-        return "SET_TORQUE";
-    case CAN_CMD_SET_VELOCITY:
-        return "SET_VELOCITY";
-    case CAN_CMD_SET_POSITION:
-        return "SET_POSITION";
-    case CAN_CMD_SYNC:
-        return "SYNC";
-    case CAN_CMD_CALIB_START:
-        return "CALIB_START";
-    case CAN_CMD_CALIB_REPORT:
-        return "CALIB_REPORT";
-    case CAN_CMD_CALIB_ABORT:
-        return "CALIB_ABORT";
-    case CAN_CMD_ANTICOGGING_START:
-        return "ANTICOGGING_START";
-    case CAN_CMD_ANTICOGGING_REPORT:
-        return "ANTICOGGING_REPORT";
-    case CAN_CMD_ANTICOGGING_ABORT:
-        return "ANTICOGGING_ABORT";
-    case CAN_CMD_SET_HOME:
-        return "SET_HOME";
-    case CAN_CMD_ERROR_RESET:
-        return "ERROR_RESET";
-    case CAN_CMD_GET_STATUSWORD:
-        return "GET_STATUSWORD";
-    case CAN_CMD_STATUSWORD_REPORT:
-        return "STATUSWORD_REPORT";
-    case CAN_CMD_GET_VALUE_1:
-        return "GET_VALUE_1";
-    case CAN_CMD_GET_VALUE_2:
-        return "GET_VALUE_2";
-    case CAN_CMD_HEARTBEAT:
-        return "HEARTBEAT";
-    case CAN_CMD_SET_CONFIG:
-        return "SET_CONFIG";
-    case CAN_CMD_GET_CONFIG:
-        return "GET_CONFIG";
-    case CAN_CMD_SAVE_ALL_CONFIG:
-        return "SAVE_ALL_CONFIG";
-    case CAN_CMD_RESET_ALL_CONFIG:
-        return "RESET_ALL_CONFIG";
-    case CAN_CMD_GET_FW_VERSION:
-        return "GET_FW_VERSION";
-    case CAN_CMD_DFU_START:
-        return "DFU_START";
-    case CAN_CMD_DFU_DATA:
-        return "DFU_DATA";
-    case CAN_CMD_DFU_END:
-        return "DFU_END";
-    default:
-        return "UNKNOWN";
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+    if (axis == MOTOR_HW_AXIS_RIGHT) {
+        return (uint8_t) (mNodeID + 1U);
     }
+#else
+    (void) axis;
+#endif
+
+    return mNodeID;
 }
 
-static bool can_cmd_is_critical(uint8_t cmd)
+static bool can_node_to_axis(uint8_t node_id, motor_hw_axis_t *axis)
 {
-    switch (cmd) {
-    case CAN_CMD_SET_OP_MODE:
-    case CAN_CMD_MOTOR_ENABLE:
-    case CAN_CMD_MOTOR_DISABLE:
-    case CAN_CMD_CALIB_START:
-    case CAN_CMD_CALIB_ABORT:
-    case CAN_CMD_ANTICOGGING_START:
-    case CAN_CMD_ANTICOGGING_ABORT:
-    case CAN_CMD_SET_HOME:
-    case CAN_CMD_ERROR_RESET:
-    case CAN_CMD_GET_STATUSWORD:
-    case CAN_CMD_GET_FW_VERSION:
-    case CAN_CMD_SET_CONFIG:
-    case CAN_CMD_GET_CONFIG:
-    case CAN_CMD_SAVE_ALL_CONFIG:
-    case CAN_CMD_RESET_ALL_CONFIG:
-    case CAN_CMD_DFU_START:
-    case CAN_CMD_DFU_END:
+    if (node_id == mNodeID) {
+        *axis = MOTOR_HW_AXIS_LEFT;
         return true;
-    default:
+    }
+
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+    if (node_id == (uint8_t) (mNodeID + 1U)) {
+        *axis = MOTOR_HW_AXIS_RIGHT;
+        return true;
+    }
+#endif
+
+    return false;
+}
+
+static bool can_frame_is_broadcast(const CanFrame *frame)
+{
+    return (GET_NODE_ID(frame->id) == 0U);
+}
+
+static bool can_for_each_target_axis(uint8_t node_id, motor_hw_axis_t *axis, uint8_t *cursor)
+{
+    if (node_id == 0U) {
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+        if (*cursor == 0U) {
+            *axis = MOTOR_HW_AXIS_LEFT;
+            *cursor = 1U;
+            return true;
+        }
+        if (*cursor == 1U) {
+            *axis = MOTOR_HW_AXIS_RIGHT;
+            *cursor = 2U;
+            return true;
+        }
+        return false;
+#else
+        if (*cursor == 0U) {
+            *axis = CONTROLLER_active_axis();
+            *cursor = 1U;
+            return true;
+        }
+        return false;
+#endif
+    }
+
+    if (*cursor != 0U) {
         return false;
     }
+
+    *cursor = 1U;
+    return can_node_to_axis(node_id, axis);
 }
 
-static void can_log_frame(const char *tag, const CanFrame *frame)
+static void can_reset_axis_rx_timeout(motor_hw_axis_t axis)
 {
-    uint8_t cmd = GET_CMD(frame->id);
-    CAN_LOG("[CAN] %s id=0x%03X node=%u cmd=%u(%s) dlc=%u echo=%u\n",
-            tag,
-            (unsigned) (frame->id & 0x7FFU),
-            (unsigned) GET_NODE_ID(frame->id),
-            (unsigned) cmd,
-            can_cmd_name(cmd),
-            (unsigned) frame->dlc,
-            (unsigned) !!IS_ECHO(frame->id));
+    mAxisRxTick[can_axis_index(axis)] = SystickCount;
 }
 
-static void fill_value(uint8_t idx, uint8_t *data)
+static void can_reset_target_rx_timeout(uint8_t node_id)
 {
+    motor_hw_axis_t axis;
+    uint8_t cursor = 0U;
+
+    mRxTick = SystickCount;
+    while (can_for_each_target_axis(node_id, &axis, &cursor)) {
+        can_reset_axis_rx_timeout(axis);
+    }
+}
+
+static void can_check_rx_timeout(void)
+{
+    if (!UsrConfig.heartbeat_consumer_ms) {
+        return;
+    }
+
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+    if (MCT_axis_is_enabled(MOTOR_HW_AXIS_LEFT)
+        && (get_ms_since(mAxisRxTick[can_axis_index(MOTOR_HW_AXIS_LEFT)]) > UsrConfig.heartbeat_consumer_ms)) {
+        MCT_axis_disable(MOTOR_HW_AXIS_LEFT);
+    }
+    if (MCT_axis_is_enabled(MOTOR_HW_AXIS_RIGHT)
+        && (get_ms_since(mAxisRxTick[can_axis_index(MOTOR_HW_AXIS_RIGHT)]) > UsrConfig.heartbeat_consumer_ms)) {
+        MCT_axis_disable(MOTOR_HW_AXIS_RIGHT);
+    }
+
+    if (MCT_axis_is_calibrating(MOTOR_HW_AXIS_LEFT)
+        && (get_ms_since(mAxisRxTick[can_axis_index(MOTOR_HW_AXIS_LEFT)]) > UsrConfig.heartbeat_consumer_ms)) {
+        MCT_axis_calibration_abort(MOTOR_HW_AXIS_LEFT);
+    }
+    if (MCT_axis_is_calibrating(MOTOR_HW_AXIS_RIGHT)
+        && (get_ms_since(mAxisRxTick[can_axis_index(MOTOR_HW_AXIS_RIGHT)]) > UsrConfig.heartbeat_consumer_ms)) {
+        MCT_axis_calibration_abort(MOTOR_HW_AXIS_RIGHT);
+    }
+#else
+    if (get_ms_since(mRxTick) > UsrConfig.heartbeat_consumer_ms) {
+        MCT_set_state(IDLE);
+    }
+#endif
+}
+
+static void can_tx_heartbeat(void)
+{
+    CanFrame tx_frame;
+
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+    tx_frame.id  = ID_ECHO_BIT | (can_axis_node_id(MOTOR_HW_AXIS_LEFT) << 5) | CAN_CMD_HEARTBEAT;
+    tx_frame.dlc = 0;
+    can_tx(&tx_frame);
+
+    tx_frame.id  = ID_ECHO_BIT | (can_axis_node_id(MOTOR_HW_AXIS_RIGHT) << 5) | CAN_CMD_HEARTBEAT;
+    tx_frame.dlc = 0;
+    can_tx(&tx_frame);
+#else
+    tx_frame.id  = ID_ECHO_BIT | (mNodeID << 5) | CAN_CMD_HEARTBEAT;
+    tx_frame.dlc = 0;
+    can_tx(&tx_frame);
+#endif
+}
+
+static uint8_t can_axis_index(motor_hw_axis_t axis)
+{
+    return (axis == MOTOR_HW_AXIS_RIGHT) ? 1U : 0U;
+}
+
+static bool can_is_idle_and_disarmed(void)
+{
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+    return ((MCT_get_state() == IDLE)
+            && (!FOC_axis(MOTOR_HW_AXIS_LEFT)->is_armed)
+            && (!FOC_axis(MOTOR_HW_AXIS_RIGHT)->is_armed));
+#else
+    return ((MCT_get_state() == IDLE) && (!Foc.is_armed));
+#endif
+}
+
+static void fill_value(motor_hw_axis_t axis, uint8_t idx, uint8_t *data)
+{
+    tAxisConfig *config = USR_CONFIG_axis(axis);
+    tFOC *foc = FOC_axis(axis);
+    tEncoder *encoder = ENCODER_axis(axis);
+
     switch (idx) {
     case 0:
-        if (UsrConfig.invert_motor_dir) {
-            float_to_data(-Foc.i_q_filt, data);
+        if (config->invert_motor_dir) {
+            float_to_data(-foc->i_q_filt, data);
         } else {
-            float_to_data(+Foc.i_q_filt, data);
+            float_to_data(+foc->i_q_filt, data);
         }
         break;
 
     case 1:
-        if (UsrConfig.invert_motor_dir) {
-            float_to_data(-Encoder.vel, data);
+        if (config->invert_motor_dir) {
+            float_to_data(-encoder->vel, data);
         } else {
-            float_to_data(+Encoder.vel, data);
+            float_to_data(+encoder->vel, data);
         }
         break;
 
     case 2:
-        if (UsrConfig.invert_motor_dir) {
-            float_to_data(-Encoder.pos, data);
+        if (config->invert_motor_dir) {
+            float_to_data(-encoder->pos, data);
         } else {
-            float_to_data(+Encoder.pos, data);
+            float_to_data(+encoder->pos, data);
         }
         break;
 
     case 3:
-        float_to_data(Foc.v_bus_filt, data);
+        float_to_data(foc->v_bus_filt, data);
         break;
 
     case 4:
-        float_to_data(Foc.i_bus_filt, data);
+        float_to_data(foc->i_bus_filt, data);
         break;
 
     case 5:
-        float_to_data(Foc.power_filt, data);
+        float_to_data(foc->power_filt, data);
         break;
 
     case 6:
@@ -336,12 +373,34 @@ static void fill_value(uint8_t idx, uint8_t *data)
     }
 }
 
+static void can_tx_axis_statusword_reply(motor_hw_axis_t axis)
+{
+    CanFrame tx_frame;
+
+    tx_frame.id      = ID_ECHO_BIT | (can_axis_node_id(axis) << 5) | CAN_CMD_GET_STATUSWORD;
+    tx_frame.data[0] = MCT_axis_statusword(axis)->status.status_code;
+    tx_frame.data[1] = MCT_axis_statusword(axis)->errors.errors_code;
+    tx_frame.dlc     = 2;
+    (void) can_tx(&tx_frame);
+}
+
+static void can_tx_axis_value_reply(motor_hw_axis_t axis, uint8_t cmd, uint8_t value_index)
+{
+    CanFrame tx_frame;
+
+    tx_frame.id = ID_ECHO_BIT | (can_axis_node_id(axis) << 5) | cmd;
+    fill_value(axis, value_index, tx_frame.data);
+    tx_frame.dlc = 4;
+    (void) can_tx(&tx_frame);
+}
+
 static void parse_frame(CanFrame *frame)
 {
     int     ret;
     bool    echo    = false;
     uint8_t node_id = GET_NODE_ID(frame->id);
     uint8_t cmd     = GET_CMD(frame->id);
+    motor_hw_axis_t axis = CONTROLLER_active_axis();
 
     // Dir check
     if (IS_ECHO(frame->id)) {
@@ -352,33 +411,41 @@ static void parse_frame(CanFrame *frame)
     frame->id |= ID_ECHO_BIT;
 
     // Node id check
-    if (node_id != mNodeID && node_id != 0) {
+    if ((node_id != 0U) && !can_node_to_axis(node_id, &axis)) {
         return;
     }
 
-    CAN_reset_rx_timeout();
-
-    if (can_cmd_is_critical(cmd)) {
-        can_log_frame("rx", frame);
-    }
+    can_reset_target_rx_timeout(node_id);
 
     switch (cmd) {
-    case CAN_CMD_SET_OP_MODE:
-        ret            = (frame->dlc == 1U) ? CONTROLLER_set_op_mode((tControlMode) frame->data[0]) : -1;
+    case CAN_CMD_SET_OP_MODE: {
+        uint8_t cursor = 0U;
+        ret = (frame->dlc == 1U) ? 0 : -1;
+        while ((ret == 0) && can_for_each_target_axis(node_id, &axis, &cursor)) {
+            ret += CONTROLLER_axis_set_op_mode(axis, (tControlMode) frame->data[0]);
+        }
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
-        break;
+    } break;
 
     case CAN_CMD_MOTOR_ENABLE:
-        ret            = MCT_set_state(RUN);
+        if (can_frame_is_broadcast(frame)) {
+            ret = MCT_set_state(RUN);
+        } else {
+            ret = MCT_axis_enable(axis);
+        }
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
         break;
 
     case CAN_CMD_MOTOR_DISABLE:
-        ret            = MCT_set_state(IDLE);
+        if (can_frame_is_broadcast(frame)) {
+            ret = MCT_set_state(IDLE);
+        } else {
+            ret = MCT_axis_disable(axis);
+        }
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
@@ -386,65 +453,102 @@ static void parse_frame(CanFrame *frame)
 
     case CAN_CMD_SET_TORQUE:
         if (frame->dlc == 4) {
-            if (UsrConfig.invert_motor_dir) {
-                Controller.input_current_buffer = -data_to_float(&frame->data[0]);
-            } else {
-                Controller.input_current_buffer = +data_to_float(&frame->data[0]);
-            }
-            if (!UsrConfig.sync_target_enable) {
-                CONTROLLER_sync_callback();
+            uint8_t cursor = 0U;
+            while (can_for_each_target_axis(node_id, &axis, &cursor)) {
+                tAxisConfig *config = USR_CONFIG_axis(axis);
+                tController *controller = CONTROLLER_axis(axis);
+
+                if (config->invert_motor_dir) {
+                    controller->input_current_buffer = -data_to_float(&frame->data[0]);
+                } else {
+                    controller->input_current_buffer = +data_to_float(&frame->data[0]);
+                }
+                if (!config->sync_target_enable) {
+                    CONTROLLER_axis_sync_callback(axis);
+                }
             }
         }
         break;
 
     case CAN_CMD_SET_VELOCITY:
         if (frame->dlc == 4) {
-            if (UsrConfig.invert_motor_dir) {
-                Controller.input_velocity_buffer = -data_to_float(&frame->data[0]);
-            } else {
-                Controller.input_velocity_buffer = +data_to_float(&frame->data[0]);
-            }
-            if (!UsrConfig.sync_target_enable) {
-                CONTROLLER_sync_callback();
+            uint8_t cursor = 0U;
+            while (can_for_each_target_axis(node_id, &axis, &cursor)) {
+                tAxisConfig *config = USR_CONFIG_axis(axis);
+                tController *controller = CONTROLLER_axis(axis);
+
+                if (config->invert_motor_dir) {
+                    controller->input_velocity_buffer = -data_to_float(&frame->data[0]);
+                } else {
+                    controller->input_velocity_buffer = +data_to_float(&frame->data[0]);
+                }
+                if (!config->sync_target_enable) {
+                    CONTROLLER_axis_sync_callback(axis);
+                }
             }
         }
         break;
 
     case CAN_CMD_SET_POSITION:
         if (frame->dlc == 4) {
-            if (UsrConfig.invert_motor_dir) {
-                Controller.input_position_buffer = -data_to_float(&frame->data[0]);
-            } else {
-                Controller.input_position_buffer = +data_to_float(&frame->data[0]);
-            }
-            if (!UsrConfig.sync_target_enable) {
-                CONTROLLER_sync_callback();
+            uint8_t cursor = 0U;
+            while (can_for_each_target_axis(node_id, &axis, &cursor)) {
+                tAxisConfig *config = USR_CONFIG_axis(axis);
+                tController *controller = CONTROLLER_axis(axis);
+
+                if (config->invert_motor_dir) {
+                    controller->input_position_buffer = -data_to_float(&frame->data[0]);
+                } else {
+                    controller->input_position_buffer = +data_to_float(&frame->data[0]);
+                }
+                if (!config->sync_target_enable) {
+                    CONTROLLER_axis_sync_callback(axis);
+                }
             }
         }
         break;
 
     case CAN_CMD_SYNC:
-        if (UsrConfig.sync_target_enable) {
-            CONTROLLER_sync_callback();
+        {
+            uint8_t cursor = 0U;
+            while (can_for_each_target_axis(node_id, &axis, &cursor)) {
+                if (USR_CONFIG_axis(axis)->sync_target_enable) {
+                    CONTROLLER_axis_sync_callback(axis);
+                }
+            }
         }
         break;
 
     case CAN_CMD_CALIB_START:
-        ret            = MCT_set_state(CALIBRATION);
+        if (can_frame_is_broadcast(frame)) {
+            ret = -1;
+        } else {
+            CALIBRATION_select_axis(axis);
+            ret = MCT_set_state(CALIBRATION);
+        }
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
         break;
 
     case CAN_CMD_CALIB_ABORT:
-        ret            = MCT_set_state(IDLE);
+        if (can_frame_is_broadcast(frame)) {
+            ret = MCT_set_state(IDLE);
+        } else {
+            ret = MCT_axis_calibration_abort(axis);
+        }
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
         break;
 
     case CAN_CMD_ANTICOGGING_START:
-        ret            = MCT_set_state(ANTICOGGING);
+        if (can_frame_is_broadcast(frame)) {
+            ret = -1;
+        } else {
+            ANTICOGGING_select_axis(axis);
+            ret = MCT_set_state(ANTICOGGING);
+        }
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
@@ -458,34 +562,59 @@ static void parse_frame(CanFrame *frame)
         break;
 
     case CAN_CMD_SET_HOME:
-        ret            = CONTROLLER_set_home();
+        if (can_frame_is_broadcast(frame)) {
+            ret = CONTROLLER_set_home();
+        } else {
+            ret = CONTROLLER_axis_set_home(axis);
+        }
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
         break;
 
     case CAN_CMD_ERROR_RESET:
-        ret            = MCT_reset_error();
+        if (can_frame_is_broadcast(frame)) {
+            ret = MCT_reset_error();
+        } else {
+            ret = MCT_axis_reset_error(axis);
+        }
         frame->data[0] = ret == 0 ? 0x00 : 0xEE;
         frame->dlc     = 1;
         echo           = true;
         break;
 
     case CAN_CMD_GET_STATUSWORD:
-        frame->data[0] = StatuswordNew.status.status_code;
-        frame->data[1] = StatuswordNew.errors.errors_code;
+        if (can_frame_is_broadcast(frame)) {
+            can_tx_axis_statusword_reply(MOTOR_HW_AXIS_LEFT);
+            can_tx_axis_statusword_reply(MOTOR_HW_AXIS_RIGHT);
+            break;
+        }
+        frame->data[0] = MCT_axis_statusword(axis)->status.status_code;
+        frame->data[1] = MCT_axis_statusword(axis)->errors.errors_code;
         frame->dlc     = 2;
         echo           = true;
         break;
 
     case CAN_CMD_GET_VALUE_1:
-        fill_value(frame->data[0], frame->data);
+        if (can_frame_is_broadcast(frame)) {
+            uint8_t value_index = frame->data[0];
+            can_tx_axis_value_reply(MOTOR_HW_AXIS_LEFT, cmd, value_index);
+            can_tx_axis_value_reply(MOTOR_HW_AXIS_RIGHT, cmd, value_index);
+            break;
+        }
+        fill_value(axis, frame->data[0], frame->data);
         frame->dlc = 4;
         echo       = true;
         break;
 
     case CAN_CMD_GET_VALUE_2:
-        fill_value(frame->data[0], frame->data);
+        if (can_frame_is_broadcast(frame)) {
+            uint8_t value_index = frame->data[0];
+            can_tx_axis_value_reply(MOTOR_HW_AXIS_LEFT, cmd, value_index);
+            can_tx_axis_value_reply(MOTOR_HW_AXIS_RIGHT, cmd, value_index);
+            break;
+        }
+        fill_value(axis, frame->data[0], frame->data);
         frame->dlc = 4;
         echo       = true;
         break;
@@ -494,8 +623,8 @@ static void parse_frame(CanFrame *frame)
         break;
 
     case CAN_CMD_SET_CONFIG:
-        if (frame->dlc == 8U) {
-            config_callback(frame->data, true);
+        if ((frame->dlc == 8U) && !can_frame_is_broadcast(frame)) {
+            config_callback(axis, frame->data, true);
         } else {
             config_reject(frame->data);
         }
@@ -504,8 +633,8 @@ static void parse_frame(CanFrame *frame)
         break;
 
     case CAN_CMD_GET_CONFIG:
-        if (frame->dlc == 8U) {
-            config_callback(frame->data, false);
+        if ((frame->dlc == 8U) && !can_frame_is_broadcast(frame)) {
+            config_callback(axis, frame->data, false);
         } else {
             config_reject(frame->data);
         }
@@ -517,7 +646,8 @@ static void parse_frame(CanFrame *frame)
         if (can_is_idle_and_disarmed()) {
             ret = 0;
             ret += USR_CONFIG_save_config();
-            ret += USR_CONFIG_save_cogging_map();
+            ret += USR_CONFIG_axis_save_cogging_map(MOTOR_HW_AXIS_LEFT);
+            ret += USR_CONFIG_axis_save_cogging_map(MOTOR_HW_AXIS_RIGHT);
         } else {
             ret = -1;
         }
@@ -529,7 +659,8 @@ static void parse_frame(CanFrame *frame)
     case CAN_CMD_RESET_ALL_CONFIG:
         if (can_is_idle_and_disarmed()) {
             USR_CONFIG_set_default_config();
-            USR_CONFIG_set_default_cogging_map();
+            USR_CONFIG_axis_set_default_cogging_map(MOTOR_HW_AXIS_LEFT);
+            USR_CONFIG_axis_set_default_cogging_map(MOTOR_HW_AXIS_RIGHT);
             ret = 0;
         } else {
             ret = -1;
@@ -578,9 +709,7 @@ static void parse_frame(CanFrame *frame)
         echo           = true;
         if (ret == 0) {
             watch_dog_feed();
-            if (!can_tx(frame)) {
-                CAN_LOG("[CAN] drop DFU_END ack\n");
-            }
+            (void) can_tx(frame);
             delay_ms(100);
             watch_dog_feed();
             DFU_jump_bootloader();
@@ -592,39 +721,60 @@ static void parse_frame(CanFrame *frame)
     }
 
     if (echo) {
-        if (!can_tx(frame)) {
-            if (can_cmd_is_critical(cmd)) {
-                CAN_LOG("[CAN] drop ack cmd=%u(%s)\n", (unsigned) cmd, can_cmd_name(cmd));
-            }
-        } else if (can_cmd_is_critical(cmd)) {
-            can_log_frame("tx", frame);
-        }
+        frame->id = (frame->id & ~(uint32_t) ID_NODE_BIT) | ((uint32_t) can_axis_node_id(axis) << 5);
+        (void) can_tx(frame);
     }
 }
 
-static void config_callback(uint8_t *data, bool isSet)
+static void config_callback(motor_hw_axis_t axis, uint8_t *data, bool isSet)
 {
     int32_t idx           = data_to_int32(data) - 1;
-    int32_t config_number = sizeof(tUsrConfig) / 4 - 132;
+    int32_t axis_config_number = 29;
+    int32_t board_config_base = axis_config_number;
+    int32_t board_config_number = 4;
 
-    if ((idx < 0) || (idx >= config_number)) {
+    if (idx < 0) {
         config_reject(data);
         return;
     }
 
-    uint32_t *pConfig = &(((uint32_t *) (&UsrConfig))[idx]);
+    if (idx < axis_config_number) {
+        tAxisConfig *config = USR_CONFIG_axis(axis);
+        uint32_t *pConfig = &(((uint32_t *) config)[idx]);
+
+        if (isSet) {
+            if (!config_value_is_valid(axis, idx, &data[4])) {
+                config_reject(data);
+                return;
+            }
+
+            memcpy(pConfig, &data[4], 4);
+            FOC_update_axis_current_ctrl_gain(axis, config->current_ctrl_bw);
+            CONTROLLER_update_axis_input_pos_filter_gain(axis, config->position_filter_bw);
+        } else {
+            memcpy(&data[4], pConfig, 4);
+        }
+        return;
+    }
+
+    idx -= board_config_base;
+    if ((idx < 0) || (idx >= board_config_number)) {
+        config_reject(data);
+        return;
+    }
+
+    uint32_t *pBoardConfig = &(((uint32_t *) (&UsrConfig.node_id))[idx]);
 
     if (isSet) {
-        if (!config_value_is_valid(idx, &data[4])) {
+        int32_t board_idx = 29 + idx;
+        if (!config_value_is_valid(axis, board_idx, &data[4])) {
             config_reject(data);
             return;
         }
 
-        memcpy(pConfig, &data[4], 4);
-        FOC_update_current_ctrl_gain(UsrConfig.current_ctrl_bw);
-        CONTROLLER_update_input_pos_filter_gain(UsrConfig.position_filter_bw);
+        memcpy(pBoardConfig, &data[4], 4);
     } else {
-        memcpy(&data[4], pConfig, 4);
+        memcpy(&data[4], pBoardConfig, 4);
     }
 }
 
@@ -634,8 +784,10 @@ static void config_reject(uint8_t *data)
     int32_to_data(0, &data[4]);
 }
 
-static bool config_value_is_valid(int32_t idx, uint8_t *value)
+static bool config_value_is_valid(motor_hw_axis_t axis, int32_t idx, uint8_t *value)
 {
+    tAxisConfig *config = USR_CONFIG_axis(axis);
+
     switch (idx) {
     case 0:
         return int32_in_range(data_to_int32(value), 0, 1);
@@ -682,11 +834,11 @@ static bool config_value_is_valid(int32_t idx, uint8_t *value)
         return float_in_range(data_to_float(value), 1.0e-6f, 10000.0f);
     case 24: {
         float voltage = data_to_float(value);
-        return (float_in_range(voltage, 0.0f, 50.0f) && (voltage < UsrConfig.protect_over_voltage));
+        return (float_in_range(voltage, 0.0f, 50.0f) && (voltage < config->protect_over_voltage));
     }
     case 25: {
         float voltage = data_to_float(value);
-        return (float_in_range(voltage, 0.0f, 50.0f) && (voltage > UsrConfig.protect_under_voltage));
+        return (float_in_range(voltage, 0.0f, 50.0f) && (voltage > config->protect_under_voltage));
     }
     case 26:
         return float_in_range(data_to_float(value), 0.0f, 10.0f);
@@ -694,7 +846,11 @@ static bool config_value_is_valid(int32_t idx, uint8_t *value)
     case 28:
         return int32_in_range(data_to_int32(value), 0, 150);
     case 29:
+#if BOARD_ENABLE_DUAL_MOTOR_CONTROL
+        return int32_in_range(data_to_int32(value), 1, 30);
+#else
         return int32_in_range(data_to_int32(value), 1, 31);
+#endif
     case 30:
         return int32_in_range(data_to_int32(value), CAN_BAUDRATE_250K, CAN_BAUDRATE_1000K);
     case 31:

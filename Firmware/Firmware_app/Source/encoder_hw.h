@@ -18,11 +18,19 @@
 #define __ENCODER_HW_H__
 
 #include "ctm_types.h"
+#include "motor_hw.h"
 
 void ENCODER_hw_init(void);
 int32_t ENCODER_hw_read(void);
+int32_t ENCODER_hw_read_axis(motor_hw_axis_t axis);
+void ENCODER_hw_get_axis_pwm_status(motor_hw_axis_t axis,
+                                    uint8_t *valid,
+                                    uint32_t *period_cycles,
+                                    uint32_t *high_cycles);
 
-void ENCODER_pwm_capture_callback(uint16_t capture);
-void ENCODER_pwm_capture_overrun_callback(void);
+void ENCODER_pwm_capture_callback(motor_hw_axis_t axis, uint16_t capture, uint8_t signal_high);
+void ENCODER_pwm_capture_rise_callback(motor_hw_axis_t axis, uint16_t capture);
+void ENCODER_pwm_capture_fall_callback(motor_hw_axis_t axis, uint16_t capture);
+void ENCODER_pwm_capture_overrun_callback(motor_hw_axis_t axis);
 
 #endif

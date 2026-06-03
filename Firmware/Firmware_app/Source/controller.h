@@ -18,6 +18,8 @@
 #define __CONTROLLER_H__
 
 #include "ctm_types.h"
+#include "motor_hw.h"
+#include "trapTraj.h"
 
 typedef enum {
     CONTROL_MODE_CURRENT_RAMP     = 0,
@@ -48,14 +50,27 @@ typedef struct sController
 } tController;
 
 extern tController Controller;
+extern tController ControllerAxes[2];
+extern tTraj TrajAxes[2];
 
 int  CONTROLLER_set_op_mode(tControlMode mode);
 int  CONTROLLER_set_home(void);
 void CONTROLLER_sync_callback(void);
+int  CONTROLLER_axis_set_op_mode(motor_hw_axis_t axis, tControlMode mode);
+int  CONTROLLER_axis_set_home(motor_hw_axis_t axis);
+void CONTROLLER_axis_sync_callback(motor_hw_axis_t axis);
 
 void CONTROLLER_init(void);
 void CONTROLLER_update_input_pos_filter_gain(float bw);
 void CONTROLLER_reset(void);
 void CONTROLLER_loop(void);
+tController *CONTROLLER_axis(motor_hw_axis_t axis);
+tTraj *CONTROLLER_axis_traj(motor_hw_axis_t axis);
+void CONTROLLER_axis_init(motor_hw_axis_t axis);
+void CONTROLLER_update_axis_input_pos_filter_gain(motor_hw_axis_t axis, float bw);
+void CONTROLLER_axis_reset(motor_hw_axis_t axis);
+void CONTROLLER_axis_loop(motor_hw_axis_t axis);
+void CONTROLLER_broadcast_legacy_command(void);
+motor_hw_axis_t CONTROLLER_active_axis(void);
 
 #endif
