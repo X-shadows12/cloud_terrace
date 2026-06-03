@@ -44,6 +44,9 @@ volatile tMCStatusword StatuswordNew;
 volatile tMCStatusword StatuswordOld;
 volatile tMCStatusword StatuswordNewAxes[MOTOR_HW_AXIS_COUNT];
 volatile tMCStatusword StatuswordOldAxes[MOTOR_HW_AXIS_COUNT];
+volatile int32_t MCT_debug_calibration_axis    = 0;
+volatile int32_t MCT_debug_calibration_request = 0;
+volatile int32_t MCT_debug_calibration_result  = 0;
 
 #define CHARGE_BOOT_CAP_MS    10
 #define CHARGE_BOOT_CAP_TICKS (uint16_t) ((MOTOR_PWM_FREQUENCY_HZ * CHARGE_BOOT_CAP_MS) / 1000U)
@@ -80,6 +83,7 @@ static bool mct_axis_calibrated(motor_hw_axis_t axis);
 static bool mct_all_axes_calibrated(void);
 static void mct_set_axis_status(motor_hw_axis_t axis, uint8_t switched_on, uint8_t target_reached);
 static void mct_sync_legacy_status_from_active(void);
+static void mct_process_debug_requests(void);
 
 void MCT_init(void)
 {
@@ -100,6 +104,9 @@ void MCT_init(void)
     StatuswordNewAxes[1]             = StatuswordNew;
     StatuswordOldAxes[0]             = StatuswordNew;
     StatuswordOldAxes[1]             = StatuswordNew;
+    MCT_debug_calibration_axis       = 0;
+    MCT_debug_calibration_request    = 0;
+    MCT_debug_calibration_result     = 0;
 }
 
 int MCT_reset_error(void)
@@ -973,10 +980,35 @@ void MCT_low_priority_task(void)
         }
     }
 
+    mct_process_debug_requests();
     mct_sync_legacy_status_from_active();
 
     led_act_loop();
     CAN_comm_loop();
+}
+
+static void mct_process_debug_requests(void)
+{
+    motor_hw_axis_t axis;
+
+    if (MCT_debug_calibration_request == 0) {
+        return;
+    }
+
+    MCT_debug_calibration_request = 0;
+
+    if ((MCT_debug_calibration_axis < 0)
+        || (MCT_debug_calibration_axis >= (int32_t) MOTOR_HW_AXIS_COUNT)) {
+        MCT_debug_calibration_result = -4;
+        return;
+    }
+
+    axis = (MCT_debug_calibration_axis == (int32_t) MOTOR_HW_AXIS_RIGHT)
+           ? MOTOR_HW_AXIS_RIGHT
+           : MOTOR_HW_AXIS_LEFT;
+
+    CALIBRATION_select_axis(axis);
+    MCT_debug_calibration_result = MCT_set_state(CALIBRATION);
 }
 
 static void led_act_loop(void)

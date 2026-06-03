@@ -69,6 +69,10 @@ extern volatile tMCStatusword StatuswordOld;
 extern volatile tMCStatusword StatuswordNewAxes[MOTOR_HW_AXIS_COUNT];
 extern volatile tMCStatusword StatuswordOldAxes[MOTOR_HW_AXIS_COUNT];
 
+extern volatile int32_t MCT_debug_calibration_axis;
+extern volatile int32_t MCT_debug_calibration_request;
+extern volatile int32_t MCT_debug_calibration_result;
+
 void      MCT_init(void);
 int       MCT_reset_error(void);
 int       MCT_axis_reset_error(motor_hw_axis_t axis);
