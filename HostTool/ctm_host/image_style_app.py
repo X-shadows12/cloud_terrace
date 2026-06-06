@@ -553,10 +553,19 @@ class CtmHostApp(tk.Tk):
         self._flat_button(dual, "左右失能", lambda: self._call_axes("disable"), width=10, fg=RED).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0)
         )
-        self._flat_button(dual, "左右同步", lambda: self._call_axes("sync"), width=10).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
+        self._flat_button(dual, "广播同步", self._broadcast_sync, width=10).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
+
+        sync_mode = tk.Frame(controls, bg=PAGE_BG)
+        sync_mode.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self._flat_button(sync_mode, "目标同步开", lambda: self._set_axes_sync_target_enable(True), width=12).pack(
+            side=tk.LEFT, fill=tk.X, expand=True
+        )
+        self._flat_button(sync_mode, "目标同步关", lambda: self._set_axes_sync_target_enable(False), width=12).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0)
+        )
 
         poll = tk.Frame(controls, bg=PAGE_BG)
-        poll.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        poll.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.poll_interval_var = tk.IntVar(value=200)
         tk.Label(poll, text="轮询周期 ms", bg=PAGE_BG, fg=TEXT_FG).pack(side=tk.LEFT)
         ttk.Spinbox(poll, from_=50, to=5000, increment=50, textvariable=self.poll_interval_var, width=7).pack(side=tk.LEFT, padx=(6, 6))
@@ -900,6 +909,29 @@ class CtmHostApp(tk.Tk):
     def _call_axes(self, method_name: str, *args) -> None:
         for axis in ("left", "right"):
             self._call_axis(axis, method_name, *args)
+
+    def _set_axes_sync_target_enable(self, enabled: bool) -> None:
+        try:
+            client = self._require_client()
+            client.set_axes_sync_target_enable(enabled)
+            state = "开启" if enabled else "关闭"
+            self._log(f"左右目标同步{state}成功")
+        except Exception as exc:
+            self.tx_err_count += 1
+            self.tx_err_var.set(str(self.tx_err_count))
+            self._log(f"设置目标同步失败：{exc}")
+            messagebox.showerror("设置目标同步失败", str(exc))
+
+    def _broadcast_sync(self) -> None:
+        try:
+            client = self._require_client()
+            client.broadcast_sync()
+            self._log("广播 SYNC 成功")
+        except Exception as exc:
+            self.tx_err_count += 1
+            self.tx_err_var.set(str(self.tx_err_count))
+            self._log(f"广播 SYNC 失败：{exc}")
+            messagebox.showerror("广播 SYNC 失败", str(exc))
 
     def _apply_axis_mode(self, axis: str) -> None:
         reverse = {label: mode for mode, label in CONTROL_MODE_LABELS.items()}

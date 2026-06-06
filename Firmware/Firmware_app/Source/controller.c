@@ -190,6 +190,14 @@ void CONTROLLER_reset(void)
     controller_sync_legacy_from_active();
 }
 
+void CONTROLLER_axis_force_home(motor_hw_axis_t axis)
+{
+    MOTOR_HW_enter_critical();
+    controller_zero_axis_home(axis, true);
+    MOTOR_HW_exit_critical();
+    controller_sync_legacy_from_active();
+}
+
 void CONTROLLER_loop(void)
 {
     controller_sync_active_from_legacy();

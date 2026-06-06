@@ -137,7 +137,15 @@ static void encoder_loop_instance(motor_hw_axis_t axis, tEncoder *encoder)
     uint32_t lut_frac = lut_pos - (lut_idx * ENCODER_CPR);
     int off_1         = config->offset_lut[lut_idx];
     int off_2         = config->offset_lut[(lut_idx + 1U) % OFFSET_LUT_NUM];
-    int off_interp    = off_1 + (int) (((int64_t) (off_2 - off_1) * (int64_t) lut_frac) / ENCODER_CPR);
+    int off_delta     = off_2 - off_1;
+
+    if (off_delta > +ENCODER_CPR_DIV) {
+        off_delta -= ENCODER_CPR;
+    } else if (off_delta < -ENCODER_CPR_DIV) {
+        off_delta += ENCODER_CPR;
+    }
+
+    int off_interp = off_1 + (int) (((int64_t) off_delta * (int64_t) lut_frac) / ENCODER_CPR);
 
     int count = encoder->raw - off_interp - config->encoder_offset;
 

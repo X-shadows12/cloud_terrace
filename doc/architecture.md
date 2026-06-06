@@ -51,7 +51,7 @@ USE_STDPERIPH_DRIVER, GD32H7XX, GD32H7XXI, ARM_MATH_CM7
 | 默认电机侧 | 左侧驱动；定义 `CTM_H759_USE_RIGHT_MOTOR` 可切换右侧 |
 | 相电流采样 | 左侧：`ADC2` 的 `PC2_C/ADC2_IN0` 和 `PC3_C/ADC2_IN1`；右侧：`ADC0` 的 `PF11/PF12` |
 | 母线电压 | `PF13/ADC1_IN2`, 分压系数 11 |
-| 编码器默认接口 | PWM 绝对值编码器，左 `PB8/TIMER3_CH2/AF2`，右 `PB9/TIMER3_CH3/AF2`，2 MHz 捕获 tick, 32768 CPR |
+| 编码器默认接口 | PWM 绝对值编码器，左 `PB9/TIMER3_CH3/AF2`，右 `PB8/TIMER3_CH2/AF2`，2 MHz 捕获 tick, 32768 CPR |
 | 兼容编码器接口 | SPI0 磁编码器读数路径仍保留，可通过 `CTM_H759_ENCODER_INTERFACE` 切换 |
 | CAN | `CAN2`, `PD12/PD13`, classic CAN 标准帧，mailbox 0 接收、mailbox 1 发送 |
 | 用户按键 | `KEY1/PA0`, `KEY2/PC0` |
@@ -164,7 +164,7 @@ RUN/CALIBRATION/ANTICOGGING -> IDLE
 当前默认编码器接口是 PWM 绝对值输入：
 
 - `ENCODER_CPR = 32768`。
-- 捕获输入为左 `PB8/TIMER3_CH2`、右 `PB9/TIMER3_CH3`。
+- 捕获输入为左 `PB9/TIMER3_CH3`、右 `PB8/TIMER3_CH2`。
 - `encoder_hw.c` 交替捕获上升/下降沿，得到高电平 tick 和周期 tick。
 - 只有周期落在 `1000..40000` tick 且高电平合理时才更新 raw 计数。
 - 周期锁定需要连续 3 个样本，周期容差为 25%。

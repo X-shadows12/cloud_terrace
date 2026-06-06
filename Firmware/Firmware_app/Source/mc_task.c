@@ -409,11 +409,13 @@ static void enter_state(void)
     #if BOARD_ENABLE_DUAL_MOTOR_CONTROL
         if (MCT_axis_is_enabled(MOTOR_HW_AXIS_LEFT)) {
             CONTROLLER_axis_reset(MOTOR_HW_AXIS_LEFT);
+            CONTROLLER_axis_force_home(MOTOR_HW_AXIS_LEFT);
             FOC_axis_arm(MOTOR_HW_AXIS_LEFT);
             mct_set_axis_status(MOTOR_HW_AXIS_LEFT, 1U, 1U);
         }
         if (MCT_axis_is_enabled(MOTOR_HW_AXIS_RIGHT)) {
             CONTROLLER_axis_reset(MOTOR_HW_AXIS_RIGHT);
+            CONTROLLER_axis_force_home(MOTOR_HW_AXIS_RIGHT);
             FOC_axis_arm(MOTOR_HW_AXIS_RIGHT);
             mct_set_axis_status(MOTOR_HW_AXIS_RIGHT, 1U, 1U);
         }
@@ -675,6 +677,7 @@ static int mct_enable_axis_for_run(motor_hw_axis_t axis)
         mRunAxisPendingMask |= mct_axis_mask(axis);
         mAxisChargeBootCapDelay[mct_axis_index(axis)] = CHARGE_BOOT_CAP_TICKS;
         CONTROLLER_axis_reset(axis);
+        CONTROLLER_axis_force_home(axis);
         FOC_axis_arm(axis);
         mct_set_axis_status(axis, 1U, 1U);
     } else if ((mFSM.state == BOOT_UP) && (mFSM.state_next == RUN)) {

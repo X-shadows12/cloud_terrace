@@ -176,7 +176,7 @@ static void GPIO_init(void)
     gpio_bit_set(BOARD_SPI0_CS_L_PORT, BOARD_SPI0_CS_L_PIN);
     gpio_output_pp(BOARD_SPI0_CS_L_PORT, BOARD_SPI0_CS_L_PIN);
 #elif (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_PWM)
-    /* PWM encoder inputs: left PB8/TIMER3_CH2, right PB9/TIMER3_CH3. */
+    /* PWM encoder inputs: left PB9/TIMER3_CH3, right PB8/TIMER3_CH2. */
     gpio_af_input(BOARD_LEFT_ENC_PWM_PORT, BOARD_LEFT_ENC_PWM_PIN, BOARD_LEFT_ENC_PWM_AF,
                   GPIO_PUPD_PULLUP);
     gpio_af_input(BOARD_RIGHT_ENC_PWM_PORT, BOARD_RIGHT_ENC_PWM_PIN, BOARD_RIGHT_ENC_PWM_AF,
@@ -428,16 +428,16 @@ static void NVIC_init(void)
     nvic_priority_group_set(NVIC_PRIGROUP_PRE4_SUB0);
 
 #if BOARD_ENABLE_DUAL_MOTOR_CONTROL
-    nvic_irq_enable(BOARD_LEFT_PHASE_ADC_IRQ, 0U, 0U);
-    nvic_irq_enable(BOARD_RIGHT_PHASE_ADC_IRQ, 0U, 0U);
+    nvic_irq_enable(BOARD_LEFT_PHASE_ADC_IRQ, 1U, 0U);
+    nvic_irq_enable(BOARD_RIGHT_PHASE_ADC_IRQ, 1U, 0U);
 #else
-    nvic_irq_enable(BOARD_PHASE_ADC_IRQ, 0U, 0U);
+    nvic_irq_enable(BOARD_PHASE_ADC_IRQ, 1U, 0U);
+#endif
+#if (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_PWM)
+    nvic_irq_enable(BOARD_ENC_PWM_TIMER_IRQ, 0U, 0U);
 #endif
     nvic_irq_enable(BOARD_SYSTEM_TIMER_IRQ, 1U, 0U);
     nvic_irq_enable(BOARD_CAN_IRQ, 2U, 0U);
-#if (BOARD_ENCODER_INTERFACE == BOARD_ENCODER_IF_PWM)
-    nvic_irq_enable(BOARD_ENC_PWM_TIMER_IRQ, 3U, 0U);
-#endif
 }
 
 static void WATCH_DOG_init(void)

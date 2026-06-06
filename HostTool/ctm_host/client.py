@@ -7,6 +7,7 @@ import time
 
 from .protocol import (
     CONFIG_BY_INDEX,
+    CONFIG_BY_KEY,
     Command,
     ConfigItem,
     ControlMode,
@@ -112,6 +113,16 @@ class CtmClient:
 
     def sync(self) -> None:
         self._send_no_reply(Command.SYNC)
+
+    def broadcast_sync(self) -> None:
+        self._with_target_axis("broadcast", self.sync)
+
+    def set_sync_target_enable(self, enabled: bool) -> None:
+        self.set_config(CONFIG_BY_KEY["sync_target_enable"], 1 if enabled else 0)
+
+    def set_axes_sync_target_enable(self, enabled: bool) -> None:
+        for axis in ("left", "right"):
+            self.call_axis(axis, "set_sync_target_enable", enabled)
 
     def set_home(self) -> None:
         self._send_ack(Command.SET_HOME)

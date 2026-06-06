@@ -63,6 +63,7 @@ void CONTROLLER_axis_sync_callback(motor_hw_axis_t axis);
 void CONTROLLER_init(void);
 void CONTROLLER_update_input_pos_filter_gain(float bw);
 void CONTROLLER_reset(void);
+void CONTROLLER_axis_force_home(motor_hw_axis_t axis);
 void CONTROLLER_loop(void);
 tController *CONTROLLER_axis(motor_hw_axis_t axis);
 tTraj *CONTROLLER_axis_traj(motor_hw_axis_t axis);
